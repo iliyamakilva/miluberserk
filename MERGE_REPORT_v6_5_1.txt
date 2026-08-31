@@ -1,0 +1,63 @@
+Berserk VPN v6.5.1 — Three-Way Merge Report
+============================================
+
+Sources merged:
+1) BerserkVPN v6.4.2 — Referral Visibility & Ready Plan Templates
+2) BerserkVPN v6.5.0 — Admin Users & Reports UX Upgrade
+Common base: BerserkVPN v6.4.1 — Railway & Provider Error Hotfix
+Schema: 640 (no new migration)
+
+Merge policy:
+- v6.5.0 was not blindly selected as the newer source.
+- Both branches were compared against their shared v6.4.1 base.
+- Non-overlapping changes were retained automatically.
+- Overlapping admin/user changes were resolved manually.
+- No existing source file from either archive was removed.
+
+Retained from v6.4.2:
+- Referral real/test counts in user management.
+- Referrer, rewarded referral count and referral reward total in user profile.
+- Seven ready-made plan template packs.
+- Draft-first application to package button, checkout, purchase success and service delivery.
+- Global/category/plan scope, preview, edit, publish, history and restore workflow.
+
+Retained from v6.5.0:
+- New admin users dashboard.
+- Smart 7/30-day user insights.
+- Automatic user segments and six-item pagination.
+- Targeted broadcasts for safe business segments.
+- Sales/users/services/payments/support/funnel report dashboard.
+- All navigation and handler registration changes.
+
+Manual conflict resolution:
+- The old flat user-list renderer from v6.4.2 was not restored as a duplicate path.
+- Referral real/test counts were integrated into the new v6.5 paginated segment renderer.
+- Referral fields were added to the central list_user_segment SQL result.
+- The full referral summary remains in the individual user profile.
+- Ready-template handlers remain inside the single v6.4 content center.
+- A duplicate _fmt_bytes definition inherited from v6.5.0 was consolidated into one implementation.
+
+Data safety:
+- No destructive SQL was introduced.
+- No table or column was removed.
+- No new migration is required.
+- Existing database, wallet, purchases, subscriptions, tickets, discounts, queues and content remain intact.
+
+Validation completed:
+- Python compile and AST parse: PASS (19 Python files)
+- Full import of db/commerce/content/messages/settings/subs/wallet/v63_handlers/v64_handlers/admin/tickets/bot: PASS
+- Database health on fresh Schema 640 database: PASS
+- Referral list and individual profile rendering: PASS
+- All 7 ready plan packs preview: PASS
+- Draft-first apply without auto-publish: PASS
+- Handler uniqueness for ready packs, user insights/segments and all new reports: PASS
+- Registered handlers: 234 callback / 52 message
+- CallbackData maximum checked below Telegram 64-byte limit: PASS
+- User segment and targeted-broadcast SQL smoke tests: PASS
+- Reports query smoke tests: PASS
+
+Not executed in the build environment:
+- Real Telegram message delivery
+- Real payment
+- Live Railway deployment
+- Live YouPanel provisioning

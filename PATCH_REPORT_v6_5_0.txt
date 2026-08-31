@@ -1,0 +1,46 @@
+Berserk VPN v6.5.0 — Patch Report
+=================================
+
+Base:
+- BerserkVPN v6.4.1 Railway & Provider Error Hotfix Full-Size
+- Schema: 640
+
+Changed files:
+- admin.py
+  - User-management dashboard
+  - Smart user summary for 7/30 days
+  - Automatic user segments and six-item pagination
+  - Targeted broadcast entry points
+  - Reports dashboard and sales/users/services/payments/support/funnel reports
+  - Handler registration and navigation corrections
+- db.py
+  - Safe fixed-SQL user segment engine
+  - User insight queries
+  - Service/payment/support report summaries
+  - Expanded targeted broadcast scopes
+- README.md
+- VERSION.txt
+
+Added files:
+- ADMIN_USERS_REPORTS_GUIDE.txt
+- PATCH_REPORT_v6_5_0.txt
+
+Data safety:
+- No destructive SQL.
+- No existing table or column removed.
+- No new migration required.
+- Schema version remains 640.
+- Purchase, wallet, provider, order queue and customer purchase flow are unchanged.
+
+Test results:
+- Python compile: PASS
+- Empty-database rendering: PASS
+- Full bot import: PASS (228 callback handlers, 52 message handlers)
+- Admin handler registration smoke test: PASS
+- User segment counts and paginated lists: PASS
+- Targeted broadcast count/list consistency: PASS
+- Banned-user exclusion from broadcasts: PASS
+- Test-user exclusion from new business segments: PASS
+- CallbackData <= 64 bytes: PASS
+- Main Telegram text payloads < 4096 characters: PASS
+- Sales/service/payment/support/funnel query smoke tests: PASS
