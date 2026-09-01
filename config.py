@@ -114,12 +114,15 @@ def youpanel_configured() -> bool:
 #     "base_url": "https://panel.example.com",
 #     "username": "admin",
 #     "password": "SECRET",
-#     "inbounds": {"vless": ["REALITY-XHTTP-1"]},
-#     "flow": "",
+#     "group_ids": [1],
 #     "verify_ssl": true,
 #     "timeout": 20
 #   }
 # ]
+# group_ids را از خودِ پنل، بخش Groups بردار (شماره‌ی گروهی که می‌خوای
+# مشتری‌های این پلن باهاش ساخته بشن). دیگه نیازی به اسم inbound نیست —
+# پاسارگارد از نسخه‌ی ۳ به بعد کاربر را به یک یا چند Group وصل می‌کند و
+# خودِ Group تعیین می‌کند کدام inbound(ها) فعال باشند.
 PASARGUARD_PANELS_JSON = os.getenv("PASARGUARD_PANELS_JSON", "[]").strip()
 
 
@@ -142,9 +145,14 @@ def _parse_pasarguard_panels() -> list[dict]:
         if not (key and base_url and username and password) or key in seen_keys:
             continue
         seen_keys.add(key)
-        inbounds = item.get("inbounds")
-        if not isinstance(inbounds, dict) or not inbounds:
-            inbounds = {}
+        group_ids_raw = item.get("group_ids")
+        group_ids: list[int] = []
+        if isinstance(group_ids_raw, list):
+            for g in group_ids_raw:
+                try:
+                    group_ids.append(int(g))
+                except (TypeError, ValueError):
+                    continue
         panels.append(
             {
                 "key": key,
@@ -152,8 +160,7 @@ def _parse_pasarguard_panels() -> list[dict]:
                 "base_url": base_url,
                 "username": username,
                 "password": password,
-                "inbounds": inbounds,
-                "flow": str(item.get("flow", "")),
+                "group_ids": group_ids,
                 "verify_ssl": bool(item.get("verify_ssl", True)),
                 "timeout": max(5, int(item.get("timeout", 20) or 20)),
             }

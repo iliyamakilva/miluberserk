@@ -1,7 +1,7 @@
 import logging
 
 from aiogram import types
-from config import ADMIN_IDS, TRIAL_ENABLED, TRIAL_PROVIDER_KEY
+from config import ADMIN_IDS, TRIAL_ENABLED
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,8 @@ def trial_available() -> bool:
         return False
     try:
         import subs
-        return bool(subs.get_provider_adapter(TRIAL_PROVIDER_KEY).configured())
+        import settings
+        return bool(subs.get_provider_adapter(settings.trial_provider_key()).configured())
     except Exception:
         return False
 

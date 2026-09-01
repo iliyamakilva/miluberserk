@@ -718,13 +718,20 @@ class PasarGuardError(ProviderError):
 
 
 class PasarGuardProvider(ProviderAdapter):
-    """PasarGuard-compatible adapter (also works with plain Marzban).
+    """PasarGuard adapter built on the official `pasarguard` PyPI client.
 
-    Unlike YouPanelProvider (which is a singleton bound to module-level
-    globals), each instance of this class represents one panel with its own
-    token/lock, so multiple panels (master server, secondary nodes, etc.)
-    can be registered as independent, selectable providers at the same
-    time — see PASARGUARD_PANELS_JSON in config.py.
+    Each instance represents one panel with its own token cache, so
+    multiple panels can be registered as independent, selectable providers
+    at the same time — see PASARGUARD_PANELS_JSON in config.py.
+
+    Field names below (hwid_limit, group_ids, on_hold_expire_duration) are
+    taken from the panel's own dashboard labels and the official client's
+    documented quick-start example. A couple of fields (the exact
+    DataLimitResetStrategy member names) could not be independently
+    confirmed from public docs, so PasarGuardError messages are left
+    unmodified from the underlying library/HTTP error on purpose — if a
+    field name turns out to be wrong, the panel's own validation error
+    will surface directly instead of being swallowed.
     """
 
     capabilities = {
@@ -733,139 +740,127 @@ class PasarGuardProvider(ProviderAdapter):
         "usage": True, "delete": True, "lookup": True,
     }
 
-    def __init__(self, key, label, base_url, username, password, inbounds,
-                 flow="", verify_ssl=True, timeout=20):
+    def __init__(self, key, label, base_url, username, password, group_ids,
+                 verify_ssl=True, timeout=20):
         self.key = key
         self.label = label
-        self._base_url = base_url
         self._username = username
         self._password = password
-        self._inbounds = inbounds if isinstance(inbounds, dict) else {}
-        self._flow = flow or ""
-        self._verify_ssl = verify_ssl
-        self._timeout = timeout
+        self._group_ids = group_ids if isinstance(group_ids, list) else []
         self._token: str | None = None
         self._token_lock = asyncio.Lock()
+        try:
+            from pasarguard import PasarguardAPI
+        except ImportError as exc:
+            raise PasarGuardError(
+                "missing_dependency",
+                "پکیج pasarguard نصب نیست. `pip install pasarguard` را اجرا کن.",
+            ) from exc
+        self._api = PasarguardAPI(base_url=base_url, verify=verify_ssl, timeout=float(timeout))
 
     def configured(self) -> bool:
-        return bool(self._base_url and self._username and self._password and self._inbounds)
+        return bool(self._username and self._password and self._group_ids)
 
-    def _ssl(self):
-        return None if self._verify_ssl else False
-
-    async def _login(self, force: bool = False) -> str:
+    async def _get_token(self, force: bool = False) -> str:
         if self._token and not force:
             return self._token
         async with self._token_lock:
             if self._token and not force:
                 return self._token
-            timeout = aiohttp.ClientTimeout(total=self._timeout)
+            import httpx
             try:
-                async with aiohttp.ClientSession(timeout=timeout) as session:
-                    async with session.post(
-                        f"{self._base_url}/api/admin/token",
-                        data={"username": self._username, "password": self._password, "grant_type": "password"},
-                        ssl=self._ssl(),
-                    ) as response:
-                        payload = await _read_json(response)
-                        if response.status != 200:
-                            raise PasarGuardError("login_failed", f"ورود به {self.label} ناموفق بود.", response.status)
-            except PasarGuardError:
-                raise
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                result = await self._api.get_token(username=self._username, password=self._password)
+            except httpx.HTTPStatusError as exc:
+                raise PasarGuardError("login_failed", f"ورود به {self.label} ناموفق بود ({exc.response.status_code}).", exc.response.status_code) from exc
+            except httpx.RequestError as exc:
                 raise PasarGuardError("network", f"ارتباط با {self.label} برقرار نشد.") from exc
-            token = payload.get("access_token") if isinstance(payload, dict) else None
-            if not token:
-                raise PasarGuardError("invalid_login_response", f"پاسخ ورود {self.label} توکن معتبر ندارد.")
-            self._token = str(token)
+            self._token = result.access_token
             return self._token
 
-    async def _request(self, method: str, path: str, *, json_body=None, params=None, retry_auth=True):
-        token = await self._login()
-        timeout = aiohttp.ClientTimeout(total=self._timeout)
-        headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    async def _call(self, method_name: str, *args, retry_auth=True, **kwargs):
+        """Call a method on the underlying client, auto-refreshing the
+        token once on 401 before giving up."""
+        import httpx
+        token = await self._get_token()
+        method = getattr(self._api, method_name)
         try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.request(
-                    method, f"{self._base_url}{path}", headers=headers,
-                    json=json_body, params=params, ssl=self._ssl(),
-                ) as response:
-                    payload = await _read_json(response)
-                    status = response.status
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            return await method(*args, token=token, **kwargs)
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            if status == 401 and retry_auth:
+                await self._get_token(force=True)
+                return await self._call(method_name, *args, retry_auth=False, **kwargs)
+            if status in {502, 503, 504}:
+                raise PasarGuardError("upstream_unavailable", f"{self.label} موقتاً در دسترس نیست.", status) from exc
+            detail = exc.response.text
+            if len(detail) > 300:
+                detail = detail[:297] + "..."
+            raise PasarGuardError("api_error", f"خطای {self.label} ({status}): {detail}", status) from exc
+        except httpx.RequestError as exc:
             raise PasarGuardError("network", f"ارتباط با {self.label} قطع یا زمان‌بر شد.") from exc
-        if status == 401 and retry_auth:
-            await self._login(force=True)
-            return await self._request(method, path, json_body=json_body, params=params, retry_auth=False)
-        if status < 200 or status >= 300:
-            if status in {502, 503, 504, 520, 521, 522, 523, 524, 525, 526}:
-                raise PasarGuardError(
-                    "upstream_unavailable",
-                    f"{self.label} موقتاً در دسترس نیست. چند دقیقه دیگر دوباره تلاش کنید.",
-                    status,
-                )
-            detail = payload.get("detail") if isinstance(payload, dict) else None
-            detail_text = str(detail or status).strip()
-            if len(detail_text) > 300:
-                detail_text = detail_text[:297] + "..."
-            raise PasarGuardError("api_error", f"خطای {self.label}: {detail_text}", status)
-        if not isinstance(payload, dict):
-            raise PasarGuardError("invalid_response", f"پاسخ {self.label} ساختار معتبر ندارد.", status)
-        return payload
 
-    def _user_payload(self, username, data_limit_bytes, duration_days, start_mode, reset_strategy, max_devices):
+    def _build_user_create(self, username, data_limit_bytes, duration_days, start_mode, reset_strategy, max_devices):
+        from pasarguard import UserCreate, UserStatus
         duration_seconds = max(1, int(duration_days)) * 86400
         active = start_mode == "active"
-        return {
-            "username": _clean_panel_username(username),
-            "status": "active" if active else "on_hold",
-            "expire": int(time.time()) + duration_seconds if active else None,
-            "on_hold_expire_duration": None if active else duration_seconds,
-            "data_limit": max(0, int(data_limit_bytes)),  # 0 = unlimited (panel convention)
-            "data_limit_reset_strategy": reset_strategy or "no_reset",
-            "inbounds": self._inbounds,
-            "proxies": {"vless": {"flow": self._flow}},
-            "note": "created-by-berserk-bot",
-            "backup_outbound_tags": [],
-            "primary_outbound_tag": None,
-            "routing_mode": "manual",
-            "single_device_mode": "off",
-            "max_devices": int(max_devices) if max_devices not in (None, "") else None,
-            "user_location_label": None,
-        }
+        kwargs = dict(
+            username=_clean_panel_username(username),
+            status=UserStatus.ACTIVE if active else UserStatus.ON_HOLD,
+            data_limit=max(0, int(data_limit_bytes)),  # 0 = unlimited (panel convention)
+            group_ids=self._group_ids,
+            note="created-by-berserk-bot",
+        )
+        if active:
+            kwargs["expire"] = int(time.time()) + duration_seconds
+        else:
+            kwargs["on_hold_expire_duration"] = duration_seconds
+        if reset_strategy:
+            kwargs["data_limit_reset_strategy"] = reset_strategy
+        if max_devices not in (None, ""):
+            kwargs["hwid_limit"] = int(max_devices)
+        return UserCreate(**kwargs)
 
     async def health(self):
-        return await self._request("GET", "/api/admin")
+        return await self._call("get_current_admin")
 
     async def get_user(self, username):
         try:
-            return await self._request("GET", f"/api/user/{_clean_panel_username(username)}")
+            return await self._call("get_user", _clean_panel_username(username))
         except PasarGuardError as exc:
             if getattr(exc, "status", None) == 404:
                 return None
             raise
 
     async def create_user(self, username, *, data_limit_bytes, duration_days, start_mode="on_hold", reset_strategy="no_reset", max_devices=None, options=None):
-        payload = self._user_payload(username, data_limit_bytes, duration_days, start_mode, reset_strategy, max_devices)
-        result = await self._request("POST", "/api/user", json_body=payload)
-        if not result.get("subscription_url") or not result.get("username"):
+        user = self._build_user_create(username, data_limit_bytes, duration_days, start_mode, reset_strategy, max_devices)
+        result = await self._call("create_user", user)
+        if not getattr(result, "subscription_url", None):
             raise PasarGuardError("invalid_create_response", f"{self.label} سرویس را ساخت اما لینک اشتراک برنگرداند.")
         return result
 
     async def delete_user(self, username):
-        return await self._request("DELETE", f"/api/user/{_clean_panel_username(username)}")
+        return await self._call("remove_user", _clean_panel_username(username))
 
     async def reset_usage(self, username):
-        return await self._request("POST", f"/api/user/{_clean_panel_username(username)}/reset")
+        from pasarguard import BulkUsersSelection
+        return await self._call("bulk_reset_users_data_usage", BulkUsersSelection(usernames=[_clean_panel_username(username)]))
 
     async def revoke_subscription(self, username):
-        result = await self._request("POST", f"/api/user/{_clean_panel_username(username)}/revoke_sub")
-        if not result.get("subscription_url"):
+        from pasarguard import UserModify
+        result = await self._call("modify_user", _clean_panel_username(username), UserModify(revoke_sub=True))
+        if not getattr(result, "subscription_url", None):
             raise PasarGuardError("invalid_revoke_response", f"{self.label} لینک اشتراک جدید برنگرداند.")
         return result
 
     async def usage(self, username, start="1970-01-01T00:00:00"):
-        return await self._request("GET", f"/api/user/{_clean_panel_username(username)}/usage", params={"start": start})
+        return await self._call("get_user_usage", _clean_panel_username(username), start=start)
+
+    async def list_groups(self):
+        """Fetch {id, name} for every group defined on this panel — used by
+        the admin panel so the admin can pick a group by NAME instead of
+        hunting for its numeric id manually."""
+        groups = await self._call("get_all_groups")
+        return [{"id": g.id, "name": getattr(g, "name", None) or f"#{g.id}"} for g in groups]
 
 
 _PROVIDER_REGISTRY = {"youpanel": YouPanelProvider()}
@@ -880,14 +875,31 @@ def _register_pasarguard_panels():
             base_url=panel["base_url"],
             username=panel["username"],
             password=panel["password"],
-            inbounds=panel["inbounds"],
-            flow=panel["flow"],
+            group_ids=panel["group_ids"],
             verify_ssl=panel["verify_ssl"],
             timeout=panel["timeout"],
         )
 
 
 _register_pasarguard_panels()
+
+
+async def list_all_pasarguard_groups():
+    """Fetch groups from every registered PasarGuard panel.
+
+    Returns a dict of {panel_key: {"label": str, "groups": [...], "error": str|None}}.
+    """
+    results = {}
+    for key, provider in _PROVIDER_REGISTRY.items():
+        if not isinstance(provider, PasarGuardProvider):
+            continue
+        entry = {"label": provider.label, "groups": [], "error": None}
+        try:
+            entry["groups"] = await provider.list_groups()
+        except ProviderError as exc:
+            entry["error"] = str(exc)
+        results[key] = entry
+    return results
 
 
 def list_provider_adapters(configured_only=False):

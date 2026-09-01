@@ -96,3 +96,15 @@ def force_join_message() -> str:
 
 def force_join_configured() -> bool:
     return bool(force_join_channel().strip())
+
+
+def trial_provider_key() -> str:
+    """Which configured provider serves the free trial account.
+
+    Runtime-switchable from the admin panel (Providers section), unlike
+    most other provider settings which live in .env. Falls back to
+    config.TRIAL_PROVIDER_KEY (the original env-only default) if the admin
+    hasn't picked one explicitly yet.
+    """
+    from config import TRIAL_PROVIDER_KEY
+    return get_setting("trial_provider_key", "") or TRIAL_PROVIDER_KEY

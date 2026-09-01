@@ -2679,9 +2679,11 @@ async def cb_category_delete(c: types.CallbackQuery):
 
 def providers_menu_kb():
     kb = InlineKeyboardMarkup(row_width=1)
+    trial_key = settings.trial_provider_key()
     for provider in subs.list_provider_adapters(configured_only=False):
         status = "✅ متصل" if provider.configured() else "⚠️ تنظیم نشده"
-        kb.add(InlineKeyboardButton(f"{provider.label} | {status}", callback_data=f"adm_provider_{provider.key}"))
+        trial_mark = " 🧪" if provider.key == trial_key else ""
+        kb.add(InlineKeyboardButton(f"{provider.label} | {status}{trial_mark}", callback_data=f"adm_provider_{provider.key}"))
     kb.add(InlineKeyboardButton("⬅️ کاتالوگ و فروش", callback_data="adm_section_services"))
     return kb
 
@@ -2690,7 +2692,11 @@ async def cb_providers(c: types.CallbackQuery):
     if not is_admin(c.from_user.id):
         return await c.answer()
     await c.answer()
-    await _replace_callback_message(c, "🔌 تأمین‌کننده‌ها\n\nمنطق فروشگاه مستقل از پنل است. هر پنل از این بخش به‌عنوان یک تأمین‌کننده مدیریت می‌شود.", reply_markup=providers_menu_kb())
+    await _replace_callback_message(
+        c,
+        "🔌 تأمین‌کننده‌ها\n\nمنطق فروشگاه مستقل از پنل است. هر پنل از این بخش به‌عنوان یک تأمین‌کننده مدیریت می‌شود.\n🧪 = تأمین‌کننده‌ی فعلی اکانت تست رایگان.",
+        reply_markup=providers_menu_kb(),
+    )
 
 
 async def cb_provider_detail(c: types.CallbackQuery):
@@ -2702,10 +2708,61 @@ async def cb_provider_detail(c: types.CallbackQuery):
         provider = subs.get_provider_adapter(key)
     except Exception as exc:
         return await _replace_callback_message(c, f"❌ {exc}", reply_markup=providers_menu_kb())
-    text = f"🔌 {provider.label}\n\nکلید فنی: {provider.key}\nوضعیت تنظیمات: {'کامل' if provider.configured() else 'ناقص'}"
+    is_trial = key == settings.trial_provider_key()
+    text = (
+        f"🔌 {provider.label}\n\n"
+        f"کلید فنی: {provider.key}\n"
+        f"وضعیت تنظیمات: {'کامل' if provider.configured() else 'ناقص'}\n"
+        f"اکانت تست رایگان: {'✅ همین الان از این تأمین‌کننده است' if is_trial else '➖ از این تأمین‌کننده نیست'}"
+    )
     kb = InlineKeyboardMarkup(row_width=1)
     kb.add(InlineKeyboardButton("🧪 تست اتصال", callback_data=f"adm_provider_health_{key}"))
+    if not is_trial:
+        kb.add(InlineKeyboardButton("🧪 استفاده به‌عنوان تأمین‌کننده تست", callback_data=f"adm_provider_set_trial_{key}"))
+    if isinstance(provider, subs.PasarGuardProvider):
+        kb.add(InlineKeyboardButton("📡 نمایش گروه‌های این پنل", callback_data=f"adm_provider_groups_{key}"))
     kb.add(InlineKeyboardButton("⬅️ تأمین‌کننده‌ها", callback_data="adm_providers"))
+    await _replace_callback_message(c, text, reply_markup=kb)
+
+
+async def cb_provider_set_trial(c: types.CallbackQuery):
+    if not is_admin(c.from_user.id):
+        return await c.answer()
+    key = c.data.split("adm_provider_set_trial_", 1)[1]
+    try:
+        provider = subs.get_provider_adapter(key)
+    except Exception as exc:
+        return await c.answer(f"❌ {exc}", show_alert=True)
+    db.set_setting("trial_provider_key", key)
+    db.log_admin_action(c.from_user.id, "set_trial_provider", None, f"key={key}")
+    warn = "" if provider.configured() else "\n⚠️ این تأمین‌کننده هنوز کامل تنظیم نشده؛ تا تکمیلش نکنی اکانت تست کار نمی‌کند."
+    await c.answer(f"✅ اکانت تست از این به بعد از «{provider.label}» ساخته می‌شود.{warn}", show_alert=True)
+    await cb_provider_detail(c)
+
+
+async def cb_provider_groups(c: types.CallbackQuery):
+    if not is_admin(c.from_user.id):
+        return await c.answer()
+    key = c.data.split("adm_provider_groups_", 1)[1]
+    try:
+        provider = subs.get_provider_adapter(key)
+    except Exception as exc:
+        return await c.answer(f"❌ {exc}", show_alert=True)
+    await c.answer("⏳ در حال خواندن گروه‌ها...", show_alert=False)
+    kb = InlineKeyboardMarkup(row_width=1)
+    kb.add(InlineKeyboardButton("⬅️ بازگشت", callback_data=f"adm_provider_{key}"))
+    try:
+        groups = await provider.list_groups()
+    except subs.ProviderError as exc:
+        return await _replace_callback_message(c, f"❌ خطا در خواندن گروه‌ها: {exc}", reply_markup=kb)
+    if not groups:
+        text = f"📡 {provider.label}\n\nگروهی پیدا نشد."
+    else:
+        lines = [f"📡 گروه‌های {provider.label}\n"]
+        for g in groups:
+            lines.append(f"• {g['name']} → id: {g['id']}")
+        lines.append("\nاین id رو تو group_ids داخل PASARGUARD_PANELS_JSON استفاده کن.")
+        text = "\n".join(lines)
     await _replace_callback_message(c, text, reply_markup=kb)
 
 
@@ -3711,12 +3768,39 @@ def settings_menu_kb():
         force_join_status = "روشن ولی کانال تنظیم نشده ⚠️"
     kb.add(InlineKeyboardButton(f"🔒 عضویت اجباری کانال: {force_join_status}", callback_data="adm_force_join_status"))
     kb.add(InlineKeyboardButton("🧠 ویرایش پیام‌های وضعیت", callback_data="adm_content"))
+    kb.add(InlineKeyboardButton("📡 گروه‌های پنل‌های PasarGuard", callback_data="adm_pasarguard_groups"))
     for key, label, getter, _ in SETTING_FIELDS:
         value = getter()
         display = f"{value:,}" if isinstance(value, int) else value
         kb.add(InlineKeyboardButton(f"{label}: {display}", callback_data=f"setkey_{key}"))
     kb.add(InlineKeyboardButton("⬅️ بازگشت", callback_data="adm_back"))
     return kb
+
+
+async def cb_pasarguard_groups(c: types.CallbackQuery):
+    if not is_admin(c.from_user.id):
+        return await c.answer()
+    await c.answer("⏳ در حال خواندن گروه‌ها از پنل(ها)...", show_alert=False)
+    results = await subs.list_all_pasarguard_groups()
+    if not results:
+        return await _replace_callback_message(
+            c,
+            "هیچ پنل PasarGuard تو PASARGUARD_PANELS_JSON تعریف نشده.",
+            reply_markup=settings_menu_kb(),
+        )
+    lines = ["📡 گروه‌های پنل‌های متصل\n"]
+    for key, entry in results.items():
+        lines.append(f"🔹 {entry['label']} (key: {key})")
+        if entry["error"]:
+            lines.append(f"   ❌ خطا: {entry['error']}")
+        elif not entry["groups"]:
+            lines.append("   گروهی پیدا نشد.")
+        else:
+            for g in entry["groups"]:
+                lines.append(f"   • {g['name']} → id: {g['id']}")
+        lines.append("")
+    lines.append("این id رو تو group_ids داخل PASARGUARD_PANELS_JSON (تو .env) استفاده کن.")
+    await _replace_callback_message(c, "\n".join(lines), reply_markup=settings_menu_kb())
 
 
 async def cb_settings(c: types.CallbackQuery):
@@ -4932,6 +5016,8 @@ def register(dp):
     dp.register_message_handler(process_category_form, content_types=types.ContentTypes.ANY, state=AdminStates.waiting_category_form)
     dp.register_message_handler(process_category_setting, content_types=types.ContentTypes.ANY, state=AdminStates.waiting_category_setting)
     dp.register_callback_query_handler(cb_provider_health, lambda c: c.data.startswith("adm_provider_health_"))
+    dp.register_callback_query_handler(cb_provider_set_trial, lambda c: c.data.startswith("adm_provider_set_trial_"))
+    dp.register_callback_query_handler(cb_provider_groups, lambda c: c.data.startswith("adm_provider_groups_"))
     dp.register_callback_query_handler(cb_provider_detail, lambda c: c.data.startswith("adm_provider_"))
     dp.register_callback_query_handler(cb_trials, lambda c: c.data == "adm_trials")
     dp.register_callback_query_handler(cb_trial_detail, lambda c: c.data.startswith("adm_trial_detail_"))
@@ -4968,6 +5054,7 @@ def register(dp):
     dp.register_message_handler(process_plan_setting_value, content_types=types.ContentTypes.ANY, state=AdminStates.waiting_plan_setting_value)
 
     dp.register_callback_query_handler(cb_settings, lambda c: c.data == "adm_settings")
+    dp.register_callback_query_handler(cb_pasarguard_groups, lambda c: c.data == "adm_pasarguard_groups")
     dp.register_callback_query_handler(cb_toggle_bot_status, lambda c: c.data == "adm_bot_status")
     dp.register_callback_query_handler(cb_toggle_sales_status, lambda c: c.data == "adm_sales_status")
     dp.register_callback_query_handler(cb_toggle_force_join, lambda c: c.data == "adm_force_join_status")

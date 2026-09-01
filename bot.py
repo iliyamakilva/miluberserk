@@ -25,7 +25,7 @@ import v64_handlers
 from affiliate import reward_ref
 from config import (
     ADMIN_COMMAND, ADMIN_IDS, BOT_TOKEN, TRIAL_DAYS, TRIAL_ENABLED,
-    TRIAL_MAX_DEVICES, TRIAL_PROVIDER_KEY, TRIAL_SIZE_MB,
+    TRIAL_MAX_DEVICES, TRIAL_SIZE_MB,
     validate,
 )
 from fsm_storage import SQLiteStorage
@@ -653,7 +653,7 @@ async def _create_and_send_trial(target, user_id: int, username: str = "", full_
     if not TRIAL_ENABLED:
         return await _send_content(target, user_id, "trial_error", reply_markup=menus.main_reply_kb(user_id), context="trial")
     try:
-        trial_provider = subs.get_provider_adapter(TRIAL_PROVIDER_KEY)
+        trial_provider = subs.get_provider_adapter(settings.trial_provider_key())
     except subs.ProviderError:
         return await _send_content(target, user_id, "trial_error", reply_markup=menus.main_reply_kb(user_id), context="trial")
     if not trial_provider.configured():
@@ -667,7 +667,7 @@ async def _create_and_send_trial(target, user_id: int, username: str = "", full_
         context="trial_build", kind="temp",
     )
     try:
-        item = await subs.create_trial_service(str(user_id), TRIAL_SIZE_MB, TRIAL_DAYS, provider_key=TRIAL_PROVIDER_KEY)
+        item = await subs.create_trial_service(str(user_id), TRIAL_SIZE_MB, TRIAL_DAYS, provider_key=settings.trial_provider_key())
     except subs.ProviderError as exc:
         if exc.code == "already_claimed":
             return await _send_content(target, user_id, "trial_duplicate", reply_markup=menus.main_reply_kb(user_id), context="trial_result", kind="important")
