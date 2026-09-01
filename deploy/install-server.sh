@@ -121,11 +121,11 @@ if [[ "$SKIP_WIZARD" -eq 0 ]]; then
     prompt_required "آدرس پنل (مثل https://panel.example.com)" PG_BASE_URL
     prompt_required "یوزرنیم ادمین پنل" PG_USERNAME
     prompt_required "پسورد ادمین پنل" PG_PASSWORD
-    prompt_optional "نام inbound (اگر چندتاست با کاما جدا کن)" PG_INBOUND "REALITY-1"
-    IFS=',' read -ra PG_INBOUND_ARR <<< "$PG_INBOUND"
-    PG_INBOUND_JSON=$(printf '"%s",' "${PG_INBOUND_ARR[@]}")
-    PG_INBOUND_JSON="[${PG_INBOUND_JSON%,}]"
-    PG_PANELS_JSON="[{\"key\":\"pasarguard_main\",\"label\":\"پنل اصلی\",\"base_url\":\"${PG_BASE_URL%/}\",\"username\":\"${PG_USERNAME}\",\"password\":\"${PG_PASSWORD}\",\"inbounds\":{\"vless\":${PG_INBOUND_JSON}},\"flow\":\"\",\"verify_ssl\":true,\"timeout\":20}]"
+    prompt_required "شناسه‌ی گروه (Group) در پنل — تو پنل خودت بخش Groups ببین (اگر چندتاست با کاما جدا کن)" PG_GROUPS "1"
+    IFS=',' read -ra PG_GROUPS_ARR <<< "$PG_GROUPS"
+    PG_GROUPS_JSON=$(printf '%s,' "${PG_GROUPS_ARR[@]}")
+    PG_GROUPS_JSON="[${PG_GROUPS_JSON%,}]"
+    PG_PANELS_JSON="[{\"key\":\"pasarguard_main\",\"label\":\"پنل اصلی\",\"base_url\":\"${PG_BASE_URL%/}\",\"username\":\"${PG_USERNAME}\",\"password\":\"${PG_PASSWORD}\",\"group_ids\":${PG_GROUPS_JSON},\"verify_ssl\":true,\"timeout\":20}]"
     ok "تنظیمات پنل ذخیره شد."
   else
     warn "رد شد. بعداً می‌تونی PASARGUARD_PANELS_JSON رو داخل .env دستی پر کنی."
