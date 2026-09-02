@@ -12,6 +12,7 @@ import commerce
 import content
 import backup
 import db
+import expiry_alerts
 import force_join
 import menus
 import messages
@@ -211,6 +212,8 @@ def plan_action_kb(plan, max_qty=1, user_id=None):
         kb.add(types.InlineKeyboardButton(content.render_button("btn_bulk"), callback_data="buy_bulk"))
     if mode in {"direct", "quantity"} and display["show_discount_button"]:
         kb.add(types.InlineKeyboardButton(content.render_button("btn_discount"), callback_data=f"discount_plan_{plan_id}"))
+    if mode in {"direct", "quantity"} and db.plan_provider_key(plan) != "pool":
+        kb.add(v63_handlers.custom_name_button(plan_id))
     if category_id:
         kb.add(types.InlineKeyboardButton(content.render_button("btn_back_packages"), callback_data=f"buy_cat_{category_id}"))
     else:
@@ -973,6 +976,7 @@ async def buy_qty(c: types.CallbackQuery, state: FSMContext):
                 price,
                 discount_code=discount_code,
                 request_key=request_key,
+                custom_base_username=state_data.get("custom_service_name"),
             )
         else:
             result = commerce.complete_pool_purchase(
@@ -987,7 +991,7 @@ async def buy_qty(c: types.CallbackQuery, state: FSMContext):
             return await c.message.answer(exc.message, reply_markup=wallet_menu_kb(include_bulk=True))
         return await c.message.answer(exc.message, reply_markup=menus.main_reply_kb(c.from_user.id))
 
-    await state.update_data(active_discount_code=None, active_discount_plan_id=None)
+    await state.update_data(active_discount_code=None, active_discount_plan_id=None, custom_service_name=None, active_custom_name_plan_id=None)
     await state.reset_state(with_data=False)
 
     if result.get("queued"):
@@ -1453,6 +1457,7 @@ async def on_startup(dispatcher):
         logger.exception("stale provider purchase recovery failed")
     asyncio.create_task(backup.daily_backup_loop(bot, ADMIN_IDS), name="daily-backup")
     asyncio.create_task(pasarguard_backup.pasarguard_backup_loop(bot, ADMIN_IDS), name="pasarguard-backup")
+    asyncio.create_task(expiry_alerts.expiry_alert_loop(bot), name="expiry-alerts")
     asyncio.create_task(v63_handlers.provider_queue_loop(bot), name="provider-order-queue")
     asyncio.create_task(v63_handlers.campaign_loop(bot), name="sales-campaigns")
     logger.info("Berserk VPN v6.4 started; database health OK; content, backup, provider queue and campaigns scheduled.")

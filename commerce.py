@@ -168,6 +168,17 @@ def init_schema() -> None:
         )
         db.cur.execute(
             """
+            CREATE TABLE IF NOT EXISTS expiry_warnings_sent(
+                purchase_id INTEGER NOT NULL,
+                item_index INTEGER NOT NULL,
+                warning_type TEXT NOT NULL,
+                sent_at TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY(purchase_id, item_index, warning_type)
+            )
+            """
+        )
+        db.cur.execute(
+            """
             CREATE TABLE IF NOT EXISTS discounts(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 code TEXT NOT NULL UNIQUE COLLATE NOCASE,
@@ -696,6 +707,7 @@ def begin_provider_purchase(
     discount_code: str | None = None,
     note: str = "",
     request_key: str | None = None,
+    custom_base_username: str | None = None,
 ) -> dict[str, Any]:
     user_id, quantity, plan_id = str(user_id), int(quantity), int(plan_id)
     request_key = normalize_request_key(request_key)
@@ -774,8 +786,21 @@ def begin_provider_purchase(
                    VALUES (?,?,?,?, 'pending',3)""",
                 (purchase_id, primary, active, fallback),
             )
+            custom_base = None
+            if custom_base_username:
+                import re
+                custom_base = re.sub(r"[^A-Za-z0-9_-]+", "", custom_base_username.strip())[:20]
+                if len(custom_base) < 3:
+                    custom_base = None
             for index in range(1, quantity + 1):
-                username = f"bsv-{user_id}-{purchase_id}-{index}"
+                if custom_base:
+                    candidate = f"{custom_base}-{index}" if quantity > 1 else custom_base
+                    db.cur.execute("SELECT 1 FROM provider_job_items WHERE provider_username=?", (candidate,))
+                    if db.cur.fetchone():
+                        candidate = f"{custom_base}-{index}-{purchase_id}"  # collision fallback, still readable
+                    username = candidate
+                else:
+                    username = f"bsv-{user_id}-{purchase_id}-{index}"
                 db.cur.execute(
                     """INSERT INTO provider_job_items(purchase_id,item_index,provider_key,provider_username,status)
                        VALUES (?,?,?,?, 'pending')""",
@@ -1496,3 +1521,38 @@ def template_preview(template_id: int, plan_id: int | None = None) -> str:
         return template["body"].format_map(_SafeFormat(sample))
     category = db.get_plan_category(plan["category_id"]) if plan["category_id"] else None
     return template["body"].format_map(_SafeFormat(_template_context(plan, category)))
+
+
+# ---------------------------------------------------------------------------
+# Expiry / usage warnings (renewal nudges) for provider-delivered services
+# ---------------------------------------------------------------------------
+
+def list_active_provider_items():
+    """Every provider-delivered item that is live and belongs to a
+    completed, non-test purchase — the set expiry_alerts.py should poll."""
+    db.cur.execute(
+        """
+        SELECT pji.purchase_id, pji.item_index, pji.provider_key, pji.provider_username,
+               p.user_id, p.plan_id
+        FROM provider_job_items pji
+        JOIN purchases p ON p.id = pji.purchase_id
+        WHERE pji.status = 'ready' AND p.status = 'completed' AND COALESCE(p.is_test, 0) = 0
+        """
+    )
+    return db.cur.fetchall()
+
+
+def warning_already_sent(purchase_id: int, item_index: int, warning_type: str) -> bool:
+    db.cur.execute(
+        "SELECT 1 FROM expiry_warnings_sent WHERE purchase_id=? AND item_index=? AND warning_type=?",
+        (int(purchase_id), int(item_index), warning_type),
+    )
+    return db.cur.fetchone() is not None
+
+
+def mark_warning_sent(purchase_id: int, item_index: int, warning_type: str) -> None:
+    db.cur.execute(
+        "INSERT OR IGNORE INTO expiry_warnings_sent(purchase_id, item_index, warning_type) VALUES (?, ?, ?)",
+        (int(purchase_id), int(item_index), warning_type),
+    )
+    db.conn.commit()

@@ -823,37 +823,55 @@ class PasarGuardProvider(ProviderAdapter):
     async def health(self):
         return await self._call("get_current_admin")
 
+    def _to_dict(self, obj):
+        """Normalize a pasarguard SDK Pydantic response into a plain dict.
+
+        The rest of subs.py (shared with YouPanelProvider) expects
+        dict-like items with .get()/dict(item) support; the SDK returns
+        typed Pydantic models instead, which broke every downstream
+        consumer of create_user/get_user/revoke_subscription.
+        """
+        if obj is None or isinstance(obj, dict):
+            return obj
+        if hasattr(obj, "model_dump"):
+            return obj.model_dump(mode="json")
+        if hasattr(obj, "dict"):
+            return obj.dict()
+        return obj
+
     async def get_user(self, username):
         try:
-            return await self._call("get_user", _clean_panel_username(username))
+            result = await self._call("get_user", _clean_panel_username(username))
         except PasarGuardError as exc:
             if getattr(exc, "status", None) == 404:
                 return None
             raise
+        return self._to_dict(result)
 
     async def create_user(self, username, *, data_limit_bytes, duration_days, start_mode="on_hold", reset_strategy="no_reset", max_devices=None, options=None):
         user = self._build_user_create(username, data_limit_bytes, duration_days, start_mode, reset_strategy, max_devices)
         result = await self._call("create_user", user)
         if not getattr(result, "subscription_url", None):
             raise PasarGuardError("invalid_create_response", f"{self.label} سرویس را ساخت اما لینک اشتراک برنگرداند.")
-        return result
+        return self._to_dict(result)
 
     async def delete_user(self, username):
-        return await self._call("remove_user", _clean_panel_username(username))
+        return self._to_dict(await self._call("remove_user", _clean_panel_username(username)))
 
     async def reset_usage(self, username):
         from pasarguard import BulkUsersSelection
-        return await self._call("bulk_reset_users_data_usage", BulkUsersSelection(usernames=[_clean_panel_username(username)]))
+        return self._to_dict(await self._call("bulk_reset_users_data_usage", BulkUsersSelection(usernames=[_clean_panel_username(username)])))
 
     async def revoke_subscription(self, username):
         from pasarguard import UserModify
         result = await self._call("modify_user", _clean_panel_username(username), UserModify(revoke_sub=True))
         if not getattr(result, "subscription_url", None):
             raise PasarGuardError("invalid_revoke_response", f"{self.label} لینک اشتراک جدید برنگرداند.")
-        return result
+        return self._to_dict(result)
 
     async def usage(self, username, start="1970-01-01T00:00:00"):
-        return await self._call("get_user_usage", _clean_panel_username(username), start=start)
+        result = await self._call("get_user_usage", _clean_panel_username(username), start=start)
+        return self._to_dict(result)
 
     async def list_groups(self):
         """Fetch {id, name} for every group defined on this panel — used by
@@ -1126,6 +1144,7 @@ async def provision_provider_purchase(
     note="",
     discount_code=None,
     request_key=None,
+    custom_base_username=None,
 ):
     # unit_price is accepted for backward compatibility; the current plan price is authoritative.
     reservation = commerce.begin_provider_purchase(
@@ -1135,6 +1154,7 @@ async def provision_provider_purchase(
         discount_code=discount_code,
         note=note,
         request_key=request_key,
+        custom_base_username=custom_base_username,
     )
     existing_status = (reservation.get("status") or "").lower()
     if reservation.get("existing") and existing_status in {"retry", "provisioning", "paid"}:

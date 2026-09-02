@@ -34,6 +34,7 @@ ISSUE_LABELS = {
 
 class V63States(StatesGroup):
     waiting_discount_code = State()
+    waiting_custom_name = State()
     waiting_discount_create_code = State()
     waiting_discount_create_value = State()
     waiting_discount_create_limits = State()
@@ -147,6 +148,71 @@ async def cb_discount_clear(c: types.CallbackQuery, state: FSMContext):
     await state.update_data(active_discount_code=None, active_discount_plan_id=None)
     await state.reset_state(with_data=False)
     await content.send(c.message, "discount_cleared")
+    import bot as bot_module
+    await bot_module.render_buy(c.message, c.from_user.id, c.from_user.username or "", plan_id=plan_id)
+
+
+# -------------------- Custom service name (optional, provider-delivered plans only) --------------------
+
+def custom_name_button(plan_id: int):
+    return types.InlineKeyboardButton("✏️ اسم دلخواه برای سرویس", callback_data=f"custom_name_plan_{int(plan_id)}")
+
+
+def _sanitize_custom_name(raw: str) -> str | None:
+    import re
+    value = re.sub(r"[^A-Za-z0-9_-]+", "", (raw or "").strip())
+    value = value[:24]
+    if len(value) < 3 or not value[0].isalpha():
+        return None
+    return value.lower()
+
+
+async def cb_custom_name_plan(c: types.CallbackQuery, state: FSMContext):
+    await c.answer()
+    plan_id = int(c.data.rsplit("_", 1)[1])
+    plan = db.get_plan(plan_id)
+    if not plan:
+        return await content.send(c.message, "plan_unavailable", reply_markup=menus.back_main_inline())
+    await state.update_data(active_custom_name_plan_id=plan_id)
+    await V63States.waiting_custom_name.set()
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("❌ حذف اسم دلخواه", callback_data=f"custom_name_clear_{plan_id}"))
+    kb.add(types.InlineKeyboardButton("⬅️ بازگشت به پلن", callback_data=f"buy_plan_{plan_id}"))
+    await c.message.answer(
+        "✏️ یک اسم برای سرویست بفرست (فقط حروف/عدد انگلیسی، ۳ تا ۲۴ کاراکتر، با حرف شروع بشه).\n\n"
+        "اگه نفرستی یا رد کنی، بات خودش یه اسم پیش‌فرض می‌ذاره.",
+        reply_markup=kb,
+    )
+
+
+async def process_custom_name(m: types.Message, state: FSMContext):
+    data = await state.get_data()
+    plan_id = int(data.get("active_custom_name_plan_id") or 0)
+    plan = db.get_plan(plan_id)
+    if not plan:
+        await state.finish()
+        return await content.send(m, "plan_unavailable", reply_markup=menus.main_reply_kb(m.from_user.id))
+    cleaned = _sanitize_custom_name(m.text or "")
+    if not cleaned:
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        kb.add(types.InlineKeyboardButton("❌ حذف اسم دلخواه", callback_data=f"custom_name_clear_{plan_id}"))
+        kb.add(types.InlineKeyboardButton("⬅️ بازگشت به پلن", callback_data=f"buy_plan_{plan_id}"))
+        return await m.answer(
+            "❌ این اسم معتبر نیست. فقط حروف/عدد انگلیسی، ۳ تا ۲۴ کاراکتر، باید با حرف شروع بشه. دوباره بفرست:",
+            reply_markup=kb,
+        )
+    await state.update_data(custom_service_name=cleaned, active_custom_name_plan_id=plan_id)
+    await state.reset_state(with_data=False)
+    await m.answer(f"✅ اسم «{cleaned}» ثبت شد.", reply_markup=menus.main_reply_kb(m.from_user.id))
+    import bot as bot_module
+    await bot_module.render_buy(m, m.from_user.id, m.from_user.username or "", plan_id=plan_id)
+
+
+async def cb_custom_name_clear(c: types.CallbackQuery, state: FSMContext):
+    await c.answer("اسم دلخواه حذف شد")
+    plan_id = int(c.data.rsplit("_", 1)[1])
+    await state.update_data(custom_service_name=None, active_custom_name_plan_id=None)
+    await state.reset_state(with_data=False)
     import bot as bot_module
     await bot_module.render_buy(c.message, c.from_user.id, c.from_user.username or "", plan_id=plan_id)
 
@@ -1274,8 +1340,11 @@ async def process_template_assign(m: types.Message, state: FSMContext):
 def register(dp):
     # User discount and service callbacks.
     dp.register_callback_query_handler(cb_discount_plan, lambda c: c.data.startswith("discount_plan_"), state="*")
+    dp.register_callback_query_handler(cb_custom_name_plan, lambda c: c.data.startswith("custom_name_plan_"), state="*")
+    dp.register_callback_query_handler(cb_custom_name_clear, lambda c: c.data.startswith("custom_name_clear_"), state="*")
     dp.register_callback_query_handler(cb_discount_clear, lambda c: c.data.startswith("discount_clear_"), state="*")
     dp.register_message_handler(process_discount_code, content_types=types.ContentTypes.TEXT, state=V63States.waiting_discount_code)
+    dp.register_message_handler(process_custom_name, content_types=types.ContentTypes.TEXT, state=V63States.waiting_custom_name)
     dp.register_callback_query_handler(cb_service_detail, lambda c: c.data.startswith("service_detail_"))
     dp.register_callback_query_handler(cb_service_link, lambda c: c.data.startswith("service_link_"))
     dp.register_callback_query_handler(cb_service_qr, lambda c: c.data.startswith("service_qr_"))

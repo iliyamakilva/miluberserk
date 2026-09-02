@@ -115,7 +115,7 @@ def _plan_wizard_step_text(step):
         "volume": "حجم پلن را بفرستید.\nمثال: 50GB یا 200MB\nبرای پلن نامحدود، دکمه زیر را بزنید یا «نامحدود» را بفرستید.",
         "duration": "مدت پلن را بفرستید.\nمثال: 30 روز",
         "price": "قیمت فروش را فقط عددی بفرستید.\nمثال: 180000",
-        "description": "توضیح کوتاه پلن را بفرستید.\nبرای خالی بودن، - بفرستید.",
+        "description": "توضیح کوتاه پلن را بفرستید.\n(⚠️ این متن فقط تو صفحه‌ی تأیید خرید نهایی نشون داده می‌شه، نه تو لیست پلن‌ها؛ توضیح لیست پلن‌ها از «توضیح دسته» میاد.)\nبرای خالی بودن، - بفرستید.",
     }
     return prompts.get(step, prompts["title"])
 
@@ -2584,7 +2584,7 @@ async def cb_category_detail(c: types.CallbackQuery):
 
 
 CATEGORY_EDIT_FIELDS = {
-    "title": "عنوان", "emoji": "ایموجی", "description": "توضیح",
+    "title": "عنوان", "emoji": "ایموجی", "description": "توضیح دسته (قبل از انتخاب پلن، تو لیست پلن‌ها دیده می‌شود)",
     "audience": "گروه هدف", "starts_at": "شروع نمایش", "ends_at": "پایان نمایش",
 }
 
@@ -2917,7 +2917,7 @@ PLAN_EDIT_FIELDS = {
     "volume_label": ("حجم", "text"),
     "duration_label": ("مدت", "text"),
     "price": ("قیمت فروش", "int"),
-    "description": ("توضیح کوتاه", "text"),
+    "description": ("توضیح پلن (فقط تو صفحه‌ی تأیید خرید نهایی دیده می‌شود، نه لیست پلن‌ها)", "text"),
     "sort_order": ("ترتیب نمایش", "int"),
     "max_per_order": ("حداکثر خرید در سفارش", "int"),
     "cost_price": ("قیمت خرید/هزینه", "int"),
