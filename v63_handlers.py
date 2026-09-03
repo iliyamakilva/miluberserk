@@ -16,6 +16,7 @@ import commerce
 import content
 import db
 import menus
+import settings
 import subs
 from config import ADMIN_IDS
 from utils import cleanup_qr, format_dual_datetime, make_qr
@@ -546,6 +547,10 @@ def provider_detail_kb(key: str):
     kb.add(types.InlineKeyboardButton("🔍 تست اتصال", callback_data=f"v63_provider_health_{key}"))
     kb.add(types.InlineKeyboardButton("⛔ توقف فروش" if sales else "✅ فعال‌کردن فروش", callback_data=f"v63_provider_toggle_{key}"))
     kb.add(types.InlineKeyboardButton("📜 لاگ Provider", callback_data=f"v63_provider_logs_{key}"))
+    if key != settings.trial_provider_key():
+        kb.add(types.InlineKeyboardButton("🧪 استفاده به‌عنوان تأمین‌کننده تست", callback_data=f"v63_provider_set_trial_{key}"))
+    if isinstance(subs.get_provider_adapter(key), subs.PasarGuardProvider):
+        kb.add(types.InlineKeyboardButton("📡 نمایش گروه‌های این پنل", callback_data=f"v63_provider_groups_{key}"))
     kb.add(types.InlineKeyboardButton("⬅️ تأمین‌کننده‌ها", callback_data="adm_providers"))
     return kb
 
@@ -563,6 +568,7 @@ def _provider_text(key: str) -> str:
     lines += [
         f"وضعیت اتصال: {(state['last_status'] if state else 'unknown')}",
         f"فروش جدید: {'فعال' if not state or int(state['is_sales_enabled'] or 0) else 'متوقف'}",
+        f"اکانت تست رایگان: {'✅ همین الان از این تأمین‌کننده است' if key == settings.trial_provider_key() else '➖ از این تأمین‌کننده نیست'}",
         f"آخرین بررسی: {(state['last_checked_at'] if state else None) or '-'}",
         f"زمان پاسخ: {str(state['response_ms'])+'ms' if state and state['response_ms'] is not None else '-'}",
         f"سرویس ساخته‌شده: {int(state['services_created'] or 0) if state else 0}",
@@ -624,6 +630,47 @@ async def cb_provider_logs(c: types.CallbackQuery):
     if not rows:
         lines.append("هنوز لاگی ثبت نشده است.")
     await _replace(c, "\n".join(lines)[:3900], provider_detail_kb(key))
+
+
+async def cb_provider_set_trial(c: types.CallbackQuery):
+    if not _admin(c.from_user.id):
+        return await c.answer()
+    key = c.data.split("v63_provider_set_trial_", 1)[1]
+    try:
+        provider = subs.get_provider_adapter(key)
+    except Exception as exc:
+        return await c.answer(f"❌ {exc}", show_alert=True)
+    db.set_setting("trial_provider_key", key)
+    db.log_admin_action(c.from_user.id, "set_trial_provider", None, f"key={key}")
+    warn = "" if provider.configured() else "\n⚠️ این تأمین‌کننده هنوز کامل تنظیم نشده؛ تا تکمیلش نکنی اکانت تست کار نمی‌کند."
+    await c.answer(f"✅ اکانت تست از این به بعد از «{provider.label}» ساخته می‌شود.{warn}", show_alert=True)
+    await _replace(c, _provider_text(key), provider_detail_kb(key))
+
+
+async def cb_provider_groups(c: types.CallbackQuery):
+    if not _admin(c.from_user.id):
+        return await c.answer()
+    key = c.data.split("v63_provider_groups_", 1)[1]
+    try:
+        provider = subs.get_provider_adapter(key)
+    except Exception as exc:
+        return await c.answer(f"❌ {exc}", show_alert=True)
+    await c.answer("⏳ در حال خواندن گروه‌ها...", show_alert=False)
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("⬅️ بازگشت", callback_data=f"v63_provider_{key}"))
+    try:
+        groups = await provider.list_groups()
+    except subs.ProviderError as exc:
+        return await _replace(c, f"❌ خطا در خواندن گروه‌ها: {exc}", kb)
+    if not groups:
+        text = f"📡 {provider.label}\n\nگروهی پیدا نشد."
+    else:
+        lines = [f"📡 گروه‌های {provider.label}\n"]
+        for g in groups:
+            lines.append(f"• {g['name']} → id: {g['id']}")
+        lines.append("\nاین id رو تو group_ids داخل PASARGUARD_PANELS_JSON استفاده کن.")
+        text = "\n".join(lines)
+    await _replace(c, text, kb)
 
 
 async def cb_plan_fallback(c: types.CallbackQuery):
@@ -1123,8 +1170,8 @@ async def provider_queue_loop(bot: Bot):
 
                     for index, item in enumerate(result.get("items") or [], 1):
                         try:
-                            await _bot_send_content(
-                                bot, user_id, "service_delivery",
+                            delivery = content.render(
+                                "service_delivery",
                                 {
                                     "order_id": purchase_id,
                                     "plan_title": plan["title"] if plan else "سرویس",
@@ -1139,11 +1186,24 @@ async def provider_queue_loop(bot: Bot):
                                 },
                                 category_id=category_id, plan_id=plan_id,
                             )
+                            delivery_kb = types.InlineKeyboardMarkup(row_width=1)
+                            delivery_kb.add(types.InlineKeyboardButton("📖 راهنمای اتصال", callback_data="guide_home"))
+                            if plan_id:
+                                delivery_kb.add(types.InlineKeyboardButton("🔄 تمدید همین سرویس", callback_data=f"buy_plan_{plan_id}"))
                             path = make_qr(item["link"], user_id)
                             try:
-                                qr = content.render("service_qr", {"username": item.get("account_name") or f"سرویس {index}"}, category_id=category_id, plan_id=plan_id)
-                                with open(path, "rb") as f:
-                                    await bot.send_photo(user_id, f, caption=qr["text"], parse_mode=qr["parse_mode_api"])
+                                if len(delivery["text"]) <= content.CAPTION_LIMIT:
+                                    with open(path, "rb") as f:
+                                        await bot.send_photo(
+                                            user_id, f, caption=delivery["text"],
+                                            parse_mode=delivery["parse_mode_api"], reply_markup=delivery_kb,
+                                        )
+                                else:
+                                    # caption too long for Telegram's limit: fall back to two
+                                    # messages instead of silently truncating service info.
+                                    await bot.send_message(user_id, delivery["text"], parse_mode=delivery["parse_mode_api"])
+                                    with open(path, "rb") as f:
+                                        await bot.send_photo(user_id, f, reply_markup=delivery_kb)
                             finally:
                                 cleanup_qr(path)
                         except Exception:
@@ -1363,6 +1423,8 @@ def register(dp):
     dp.register_callback_query_handler(cb_provider_health, lambda c: c.data.startswith("v63_provider_health_"))
     dp.register_callback_query_handler(cb_provider_toggle, lambda c: c.data.startswith("v63_provider_toggle_"))
     dp.register_callback_query_handler(cb_provider_logs, lambda c: c.data.startswith("v63_provider_logs_"))
+    dp.register_callback_query_handler(cb_provider_set_trial, lambda c: c.data.startswith("v63_provider_set_trial_"))
+    dp.register_callback_query_handler(cb_provider_groups, lambda c: c.data.startswith("v63_provider_groups_"))
     dp.register_callback_query_handler(cb_provider_detail, lambda c: c.data.startswith("v63_provider_"))
     dp.register_callback_query_handler(cb_plan_fallback_set, lambda c: c.data.startswith("v63_plan_fallback_set_"))
     dp.register_callback_query_handler(cb_plan_fallback, lambda c: c.data.startswith("v63_plan_fallback_"))

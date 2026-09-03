@@ -800,7 +800,8 @@ def begin_provider_purchase(
                         candidate = f"{custom_base}-{index}-{purchase_id}"  # collision fallback, still readable
                     username = candidate
                 else:
-                    username = f"bsv-{user_id}-{purchase_id}-{index}"
+                    import settings
+                    username = f"{settings.service_username_prefix()}-{user_id}-{purchase_id}-{index}"
                 db.cur.execute(
                     """INSERT INTO provider_job_items(purchase_id,item_index,provider_key,provider_username,status)
                        VALUES (?,?,?,?, 'pending')""",

@@ -1056,34 +1056,41 @@ async def buy_qty(c: types.CallbackQuery, state: FSMContext):
     for index, item in enumerate(result["items"], start=1):
         expire_date = item.get("panel_expires_at") or item.get("expires_at") or "-"
         provider_public = "تحویل آماده" if db.plan_provider_key(plan) == "pool" else "ساخت خودکار"
-        await _send_content(
-            c.message, c.from_user.id, "service_delivery",
-            {
-                "order_id": result["purchase_id"],
-                "plan_title": plan["title"] or "سرویس",
-                "username": item.get("account_name") or item.get("panel_username") or f"سرویس {index}",
-                "volume": plan["volume_label"] or "-",
-                "duration": plan["duration_label"] or "-",
-                "devices": "نامحدود" if plan["panel_max_devices"] in (None, "", 0) else f"{plan['panel_max_devices']} دستگاه",
-                "expire_date": expire_date,
-                "subscription_url": item["link"],
-                "provider_public_name": provider_public,
-                "created_at": item.get("assigned_at") or "-",
-            },
-            category_id=plan["category_id"], plan_id=plan_id,
-            context="purchase_link", kind="delivery",
-        )
+        delivery_values = {
+            "order_id": result["purchase_id"],
+            "plan_title": plan["title"] or "سرویس",
+            "username": item.get("account_name") or item.get("panel_username") or f"سرویس {index}",
+            "volume": plan["volume_label"] or "-",
+            "duration": plan["duration_label"] or "-",
+            "devices": "نامحدود" if plan["panel_max_devices"] in (None, "", 0) else f"{plan['panel_max_devices']} دستگاه",
+            "expire_date": expire_date,
+            "subscription_url": item["link"],
+            "provider_public_name": provider_public,
+            "created_at": item.get("assigned_at") or "-",
+        }
+        delivery = content.render("service_delivery", delivery_values, category_id=plan["category_id"], plan_id=plan_id)
+        delivery_kb = types.InlineKeyboardMarkup(row_width=1)
+        delivery_kb.add(types.InlineKeyboardButton("📖 راهنمای اتصال", callback_data="guide_home"))
+        delivery_kb.add(types.InlineKeyboardButton("🔄 تمدید همین سرویس", callback_data=f"buy_plan_{plan_id}"))
         qr_path = make_qr(item["link"], user_id)
         try:
-            qr_caption = content.render(
-                "service_qr", {"username": item.get("account_name") or f"سرویس {index}"},
-                category_id=plan["category_id"], plan_id=plan_id,
-            )
-            with open(qr_path, "rb") as f:
-                sent_photo = await c.message.answer_photo(
-                    f, caption=qr_caption["text"], parse_mode=qr_caption["parse_mode_api"],
+            if len(delivery["text"]) <= content.CAPTION_LIMIT:
+                with open(qr_path, "rb") as f:
+                    sent_photo = await c.message.answer_photo(
+                        f, caption=delivery["text"], parse_mode=delivery["parse_mode_api"], reply_markup=delivery_kb,
+                    )
+                    await _track_sent(c.from_user.id, sent_photo, "purchase_qr", kind="delivery")
+            else:
+                # caption too long for Telegram's limit: fall back to two messages
+                # instead of silently truncating service info.
+                await _send_content(
+                    c.message, c.from_user.id, "service_delivery", delivery_values,
+                    category_id=plan["category_id"], plan_id=plan_id,
+                    context="purchase_link", kind="delivery",
                 )
-                await _track_sent(c.from_user.id, sent_photo, "purchase_qr", kind="delivery")
+                with open(qr_path, "rb") as f:
+                    sent_photo = await c.message.answer_photo(f, reply_markup=delivery_kb)
+                    await _track_sent(c.from_user.id, sent_photo, "purchase_qr", kind="delivery")
         finally:
             cleanup_qr(qr_path)
 

@@ -570,7 +570,8 @@ def _clean_panel_username(value: str) -> str:
 
 
 def provider_username_for_order(user_id, purchase_id, index: int) -> str:
-    return _clean_panel_username(f"bsv-{user_id}-{purchase_id}-{index}")
+    import settings
+    return _clean_panel_username(f"{settings.service_username_prefix()}-{user_id}-{purchase_id}-{index}")
 
 
 def provider_trial_username(user_id) -> str:

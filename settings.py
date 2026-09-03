@@ -21,6 +21,7 @@ DEFAULTS = {
     "force_join_channel": "",
     "force_join_invite_url": "",
     "force_join_message": "🔒 برای استفاده از ربات، ابتدا در کانال زیر عضو شوید و سپس دکمه «✅ عضو شدم» را بزنید.",
+    "service_username_prefix": "bsv",
 }
 
 
@@ -108,3 +109,13 @@ def trial_provider_key() -> str:
     """
     from config import TRIAL_PROVIDER_KEY
     return get_setting("trial_provider_key", "") or TRIAL_PROVIDER_KEY
+
+
+def service_username_prefix() -> str:
+    """Prefix used for auto-generated service usernames (bsv-{user}-{...})
+    when the customer doesn't set a custom name. Admin-editable so it can
+    match the brand instead of staying hardcoded."""
+    import re
+    raw = get_setting("service_username_prefix", DEFAULTS["service_username_prefix"])
+    cleaned = re.sub(r"[^A-Za-z0-9_-]+", "", (raw or "").strip())
+    return cleaned[:12] or "bsv"

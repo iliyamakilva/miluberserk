@@ -789,6 +789,7 @@ def user_detail_kb(user_id):
         InlineKeyboardButton("📝 یادداشت ادمین", callback_data=f"adm_user_note_{user_id}"),
         InlineKeyboardButton("🧪 وضعیت تست", callback_data=f"adm_user_test_{user_id}"),
     )
+    kb.add(InlineKeyboardButton("🔄 ریست سهمیه‌ی اکانت تست رایگان", callback_data=f"adm_user_trial_reset_{user_id}"))
     kb.add(InlineKeyboardButton("💳 افزایش / کاهش موجودی", callback_data="adm_addbal"))
     kb.add(InlineKeyboardButton("🔄 بروزرسانی خلاصه", callback_data=f"adm_user_{user_id}"))
     kb.add(InlineKeyboardButton("⬅️ بازگشت به بخش کاربران", callback_data="adm_section_users"))
@@ -1371,6 +1372,19 @@ async def cb_user_test_toggle(c: types.CallbackQuery):
         + _fmt_user_summary(user_id),
         reply_markup=user_detail_kb(user_id),
     )
+
+
+async def cb_user_trial_reset(c: types.CallbackQuery):
+    if not is_admin(c.from_user.id):
+        return await c.answer()
+    user_id = c.data.split("adm_user_trial_reset_", 1)[1]
+    if not db.get_user(user_id):
+        return await c.answer("کاربر پیدا نشد.", show_alert=True)
+    had_claim = db.reset_trial_claim(user_id)
+    db.log_admin_action(c.from_user.id, "reset_trial_claim", user_id, f"had_claim={had_claim}")
+    msg = "✅ سهمیه‌ی تست این کاربر ریست شد؛ می‌تواند دوباره اکانت تست بگیرد." if had_claim else "این کاربر اصلاً سابقه‌ی درخواست تست نداشت."
+    await c.answer(msg, show_alert=True)
+    await _replace_callback_message(c, _fmt_user_summary(user_id), reply_markup=user_detail_kb(user_id))
 
 
 async def cb_direct_message_start(c: types.CallbackQuery, state: FSMContext):
@@ -2677,109 +2691,6 @@ async def cb_category_delete(c: types.CallbackQuery):
     await _replace_callback_message(c, text, reply_markup=categories_menu_kb())
 
 
-def providers_menu_kb():
-    kb = InlineKeyboardMarkup(row_width=1)
-    trial_key = settings.trial_provider_key()
-    for provider in subs.list_provider_adapters(configured_only=False):
-        status = "✅ متصل" if provider.configured() else "⚠️ تنظیم نشده"
-        trial_mark = " 🧪" if provider.key == trial_key else ""
-        kb.add(InlineKeyboardButton(f"{provider.label} | {status}{trial_mark}", callback_data=f"adm_provider_{provider.key}"))
-    kb.add(InlineKeyboardButton("⬅️ کاتالوگ و فروش", callback_data="adm_section_services"))
-    return kb
-
-
-async def cb_providers(c: types.CallbackQuery):
-    if not is_admin(c.from_user.id):
-        return await c.answer()
-    await c.answer()
-    await _replace_callback_message(
-        c,
-        "🔌 تأمین‌کننده‌ها\n\nمنطق فروشگاه مستقل از پنل است. هر پنل از این بخش به‌عنوان یک تأمین‌کننده مدیریت می‌شود.\n🧪 = تأمین‌کننده‌ی فعلی اکانت تست رایگان.",
-        reply_markup=providers_menu_kb(),
-    )
-
-
-async def cb_provider_detail(c: types.CallbackQuery):
-    if not is_admin(c.from_user.id):
-        return await c.answer()
-    await c.answer()
-    key = c.data.split("adm_provider_", 1)[1]
-    try:
-        provider = subs.get_provider_adapter(key)
-    except Exception as exc:
-        return await _replace_callback_message(c, f"❌ {exc}", reply_markup=providers_menu_kb())
-    is_trial = key == settings.trial_provider_key()
-    text = (
-        f"🔌 {provider.label}\n\n"
-        f"کلید فنی: {provider.key}\n"
-        f"وضعیت تنظیمات: {'کامل' if provider.configured() else 'ناقص'}\n"
-        f"اکانت تست رایگان: {'✅ همین الان از این تأمین‌کننده است' if is_trial else '➖ از این تأمین‌کننده نیست'}"
-    )
-    kb = InlineKeyboardMarkup(row_width=1)
-    kb.add(InlineKeyboardButton("🧪 تست اتصال", callback_data=f"adm_provider_health_{key}"))
-    if not is_trial:
-        kb.add(InlineKeyboardButton("🧪 استفاده به‌عنوان تأمین‌کننده تست", callback_data=f"adm_provider_set_trial_{key}"))
-    if isinstance(provider, subs.PasarGuardProvider):
-        kb.add(InlineKeyboardButton("📡 نمایش گروه‌های این پنل", callback_data=f"adm_provider_groups_{key}"))
-    kb.add(InlineKeyboardButton("⬅️ تأمین‌کننده‌ها", callback_data="adm_providers"))
-    await _replace_callback_message(c, text, reply_markup=kb)
-
-
-async def cb_provider_set_trial(c: types.CallbackQuery):
-    if not is_admin(c.from_user.id):
-        return await c.answer()
-    key = c.data.split("adm_provider_set_trial_", 1)[1]
-    try:
-        provider = subs.get_provider_adapter(key)
-    except Exception as exc:
-        return await c.answer(f"❌ {exc}", show_alert=True)
-    db.set_setting("trial_provider_key", key)
-    db.log_admin_action(c.from_user.id, "set_trial_provider", None, f"key={key}")
-    warn = "" if provider.configured() else "\n⚠️ این تأمین‌کننده هنوز کامل تنظیم نشده؛ تا تکمیلش نکنی اکانت تست کار نمی‌کند."
-    await c.answer(f"✅ اکانت تست از این به بعد از «{provider.label}» ساخته می‌شود.{warn}", show_alert=True)
-    await cb_provider_detail(c)
-
-
-async def cb_provider_groups(c: types.CallbackQuery):
-    if not is_admin(c.from_user.id):
-        return await c.answer()
-    key = c.data.split("adm_provider_groups_", 1)[1]
-    try:
-        provider = subs.get_provider_adapter(key)
-    except Exception as exc:
-        return await c.answer(f"❌ {exc}", show_alert=True)
-    await c.answer("⏳ در حال خواندن گروه‌ها...", show_alert=False)
-    kb = InlineKeyboardMarkup(row_width=1)
-    kb.add(InlineKeyboardButton("⬅️ بازگشت", callback_data=f"adm_provider_{key}"))
-    try:
-        groups = await provider.list_groups()
-    except subs.ProviderError as exc:
-        return await _replace_callback_message(c, f"❌ خطا در خواندن گروه‌ها: {exc}", reply_markup=kb)
-    if not groups:
-        text = f"📡 {provider.label}\n\nگروهی پیدا نشد."
-    else:
-        lines = [f"📡 گروه‌های {provider.label}\n"]
-        for g in groups:
-            lines.append(f"• {g['name']} → id: {g['id']}")
-        lines.append("\nاین id رو تو group_ids داخل PASARGUARD_PANELS_JSON استفاده کن.")
-        text = "\n".join(lines)
-    await _replace_callback_message(c, text, reply_markup=kb)
-
-
-async def cb_provider_health(c: types.CallbackQuery):
-    if not is_admin(c.from_user.id):
-        return await c.answer()
-    await c.answer("در حال بررسی اتصال...")
-    key = c.data.split("adm_provider_health_", 1)[1]
-    try:
-        result = await subs.provider_health_check(key)
-        provider = subs.get_provider_adapter(key)
-        username = result.get("username") or result.get("admin", {}).get("username") or "-"
-        text = f"✅ اتصال {provider.label} برقرار است.\nحساب: {username}"
-    except Exception as exc:
-        text = f"❌ تست اتصال ناموفق بود.\n{exc}"
-    await _replace_callback_message(c, text, reply_markup=providers_menu_kb())
-
 
 def trials_menu_kb(rows):
     kb = InlineKeyboardMarkup(row_width=1)
@@ -2906,7 +2817,7 @@ def plan_detail_kb(plan_id):
     if provider_key == "pool":
         kb.add(InlineKeyboardButton("📥 افزودن لینک به این پلن", callback_data=f"adm_addsub_plan_{plan_id}"))
     else:
-        kb.add(InlineKeyboardButton("🔌 وضعیت تأمین‌کننده", callback_data=f"adm_provider_{provider_key}"))
+        kb.add(InlineKeyboardButton("🔌 وضعیت تأمین‌کننده", callback_data=f"v63_provider_{provider_key}"))
     kb.add(InlineKeyboardButton("⬅️ مدیریت پلن‌ها", callback_data="adm_plans"))
     kb.add(InlineKeyboardButton("🏠 پنل مدیریت", callback_data="adm_back"))
     return kb
@@ -3438,7 +3349,7 @@ async def cb_plan_wizard_save(c: types.CallbackQuery, state: FSMContext):
     if db.plan_provider_key(plan) == "pool":
         kb.add(InlineKeyboardButton("📥 افزودن لینک برای این پلن", callback_data=f"adm_addsub_plan_{plan_id}"))
     else:
-        kb.add(InlineKeyboardButton("🔌 مشاهده تأمین‌کننده", callback_data=f"adm_provider_{db.plan_provider_key(plan)}"))
+        kb.add(InlineKeyboardButton("🔌 مشاهده تأمین‌کننده", callback_data=f"v63_provider_{db.plan_provider_key(plan)}"))
     kb.add(InlineKeyboardButton("⚙️ تنظیمات این پلن", callback_data=f"plan_settings_{plan_id}"))
     kb.add(InlineKeyboardButton("⬅️ مدیریت پلن‌ها", callback_data="adm_plans"))
     await _replace_callback_message(c, "✅ پلن ساخته شد.\n\n" + _fmt_plan(plan), reply_markup=kb)
@@ -3711,7 +3622,8 @@ async def cb_panel_health(c: types.CallbackQuery):
             text += f"مصرف کاربران: {_fmt_bytes(usage)}"
     except subs.ProviderError as exc:
         text = f"❌ اتصال تأمین‌کننده ناموفق است.\nدلیل: {getattr(exc, 'message', str(exc))}"
-    await _replace_callback_message(c, text, reply_markup=providers_menu_kb())
+    import v63_handlers
+    await _replace_callback_message(c, text, reply_markup=v63_handlers.providers_menu_kb())
 
 
 async def cb_plan_toggle_stock(c: types.CallbackQuery):
@@ -3750,6 +3662,7 @@ SETTING_FIELDS = [
     ("force_join_channel", "کانال عضویت اجباری (@username یا -100...)", settings.force_join_channel, "text"),
     ("force_join_invite_url", "لینک دعوت کانال (اختیاری)", settings.force_join_invite_url, "text"),
     ("force_join_message", "متن پیام عضویت اجباری", settings.force_join_message, "text"),
+    ("service_username_prefix", "پیشوند اسم پیش‌فرض سرویس (اگه مشتری اسم دلخواه نذاره)", settings.service_username_prefix, "text"),
 ]
 _STATUS_MESSAGE_FIELDS = {
     "bot_disabled_message": ("پیام خاموش بودن ربات", settings.bot_disabled_message, "text"),
@@ -4951,10 +4864,11 @@ def register(dp):
     dp.register_callback_query_handler(cb_user_finance, lambda c: c.data.startswith("adm_user_finance_"))
     dp.register_callback_query_handler(cb_user_referral, lambda c: c.data.startswith("adm_user_referral_"))
     dp.register_callback_query_handler(cb_user_tickets, lambda c: c.data.startswith("adm_user_tickets_"))
-    dp.register_callback_query_handler(cb_user_detail, lambda c: c.data.startswith("adm_user_") and not c.data.startswith(("adm_user_note_", "adm_user_test_", "adm_user_profile_", "adm_user_history_", "adm_user_purchase_", "adm_user_sub_detail_", "adm_user_finance_", "adm_user_referral_", "adm_user_tickets_")))
+    dp.register_callback_query_handler(cb_user_detail, lambda c: c.data.startswith("adm_user_") and not c.data.startswith(("adm_user_note_", "adm_user_test_", "adm_user_profile_", "adm_user_history_", "adm_user_purchase_", "adm_user_sub_detail_", "adm_user_finance_", "adm_user_referral_", "adm_user_tickets_", "adm_user_trial_reset_")))
     dp.register_callback_query_handler(cb_user_note, lambda c: c.data.startswith("adm_user_note_"))
     dp.register_message_handler(process_user_note, content_types=types.ContentTypes.ANY, state=AdminStates.waiting_user_note)
     dp.register_callback_query_handler(cb_user_test_toggle, lambda c: c.data.startswith("adm_user_test_"))
+    dp.register_callback_query_handler(cb_user_trial_reset, lambda c: c.data.startswith("adm_user_trial_reset_"))
     dp.register_callback_query_handler(cb_direct_message_start, lambda c: c.data.startswith("adm_msg_user_"))
     dp.register_message_handler(process_direct_message, content_types=types.ContentTypes.ANY, state=AdminStates.waiting_direct_message)
     dp.register_callback_query_handler(cb_resend_link, lambda c: c.data.startswith("adm_resend_link_"))
@@ -5015,10 +4929,6 @@ def register(dp):
     dp.register_callback_query_handler(cb_category_delete, lambda c: c.data.startswith("category_delete_"))
     dp.register_message_handler(process_category_form, content_types=types.ContentTypes.ANY, state=AdminStates.waiting_category_form)
     dp.register_message_handler(process_category_setting, content_types=types.ContentTypes.ANY, state=AdminStates.waiting_category_setting)
-    dp.register_callback_query_handler(cb_provider_health, lambda c: c.data.startswith("adm_provider_health_"))
-    dp.register_callback_query_handler(cb_provider_set_trial, lambda c: c.data.startswith("adm_provider_set_trial_"))
-    dp.register_callback_query_handler(cb_provider_groups, lambda c: c.data.startswith("adm_provider_groups_"))
-    dp.register_callback_query_handler(cb_provider_detail, lambda c: c.data.startswith("adm_provider_"))
     dp.register_callback_query_handler(cb_trials, lambda c: c.data == "adm_trials")
     dp.register_callback_query_handler(cb_trial_detail, lambda c: c.data.startswith("adm_trial_detail_"))
     dp.register_callback_query_handler(cb_admin_layout, lambda c: c.data == "adm_menu_layout")

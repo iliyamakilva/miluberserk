@@ -3139,6 +3139,16 @@ def get_trial_claim(user_id):
         return cur.fetchone()
 
 
+def reset_trial_claim(user_id) -> bool:
+    """Clear a user's trial-claim record so they become eligible for a
+    fresh free-trial account again (e.g. after switching providers, or as
+    a goodwill gesture). Does not touch/revoke the panel service itself."""
+    with LOCK:
+        cur.execute("DELETE FROM trial_claims WHERE user_id=?", (str(user_id),))
+        conn.commit()
+        return cur.rowcount > 0
+
+
 def update_panel_sub(sub_id, panel_item):
     link = panel_item.get("subscription_url")
     with LOCK:
