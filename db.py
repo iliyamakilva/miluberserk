@@ -450,6 +450,7 @@ def init():
         _add_column_if_missing("topups", "target_plan_id", "INTEGER")
         _add_column_if_missing("topups", "target_total", "INTEGER")
         _add_column_if_missing("topups", "target_unit_price", "INTEGER")
+        _add_column_if_missing("topups", "target_custom_name", "TEXT")
         _add_column_if_missing("topups", "purchase_completed_at", "TEXT")
         _add_column_if_missing("purchase_items", "link", "TEXT")
         _add_column_if_missing("purchase_items", "status", "TEXT DEFAULT 'active'")
@@ -1174,15 +1175,17 @@ def create_topup(
     target_plan_id=None,
     target_total=None,
     target_unit_price=None,
+    target_custom_name=None,
     request_key=None,
 ):
     user = get_user(user_id)
     is_test = int(user["is_test"] or 0) if user and "is_test" in user.keys() else 0
     request_key = (request_key or "").strip()[:180] or None
+    target_custom_name = (target_custom_name or "").strip()[:24] or None
     with LOCK:
         if request_key:
             cur.execute(
-                """SELECT id,user_id,amount,target_quantity,target_plan_id,target_total,target_unit_price
+                """SELECT id,user_id,amount,target_quantity,target_plan_id,target_total,target_unit_price,target_custom_name
                    FROM topups WHERE request_key=?""",
                 (request_key,),
             )
@@ -1195,6 +1198,7 @@ def create_topup(
                     int(target_plan_id) if target_plan_id is not None else None,
                     int(target_total) if target_total is not None else None,
                     int(target_unit_price) if target_unit_price is not None else None,
+                    target_custom_name,
                 )
                 actual = (
                     str(existing["user_id"]),
@@ -1203,6 +1207,7 @@ def create_topup(
                     existing["target_plan_id"],
                     existing["target_total"],
                     existing["target_unit_price"],
+                    existing["target_custom_name"] if "target_custom_name" in existing.keys() else None,
                 )
                 if actual != expected:
                     raise ValueError("idempotency key conflicts with another top-up")
@@ -1211,8 +1216,8 @@ def create_topup(
             """
             INSERT INTO topups(
                 user_id, amount, target_quantity, target_plan_id, target_total,
-                target_unit_price, is_test, request_key
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                target_unit_price, target_custom_name, is_test, request_key
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 str(user_id),
@@ -1221,6 +1226,7 @@ def create_topup(
                 int(target_plan_id) if target_plan_id is not None else None,
                 int(target_total) if target_total is not None else None,
                 int(target_unit_price) if target_unit_price is not None else None,
+                target_custom_name,
                 is_test,
                 request_key,
             ),
@@ -2268,6 +2274,42 @@ def toggle_plan_category(category_id):
     cur.execute("UPDATE plan_categories SET is_active=CASE WHEN is_active=1 THEN 0 ELSE 1 END,updated_at=datetime('now') WHERE id=?", (int(category_id),))
     conn.commit()
     return cur.rowcount == 1
+
+
+def plan_has_purchase_history(plan_id):
+    plan_id = int(plan_id)
+    cur.execute("SELECT COUNT(*) AS c FROM purchases WHERE plan_id=?", (plan_id,))
+    if int(cur.fetchone()["c"] or 0) > 0:
+        return True
+    cur.execute("SELECT COUNT(*) AS c FROM purchase_items WHERE plan_id=?", (plan_id,))
+    if int(cur.fetchone()["c"] or 0) > 0:
+        return True
+    cur.execute("SELECT COUNT(*) AS c FROM subs WHERE plan_id=?", (plan_id,))
+    return int(cur.fetchone()["c"] or 0) > 0
+
+
+def delete_plan(plan_id):
+    """Delete a plan.
+
+    Hard-deletes only if the plan was never actually purchased (no rows in
+    purchases/purchase_items/subs reference it) so real sales history is
+    never silently lost. If it has history, it's deactivated instead and the
+    caller is told so ("archived") rather than getting a silent no-op.
+    """
+    plan_id = int(plan_id)
+    plan = get_plan(plan_id)
+    if not plan:
+        return False, "not_found"
+    if int(plan["is_default"] or 0) == 1:
+        return False, "is_default"
+    if plan_has_purchase_history(plan_id):
+        cur.execute("UPDATE plans SET is_active=0 WHERE id=?", (plan_id,))
+        conn.commit()
+        return (cur.rowcount == 1), "archived"
+    with LOCK:
+        cur.execute("DELETE FROM plans WHERE id=?", (plan_id,))
+        conn.commit()
+        return (cur.rowcount == 1), "deleted"
 
 
 def delete_plan_category(category_id):

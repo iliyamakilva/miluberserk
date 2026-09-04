@@ -2818,8 +2818,17 @@ def plan_detail_kb(plan_id):
         kb.add(InlineKeyboardButton("📥 افزودن لینک به این پلن", callback_data=f"adm_addsub_plan_{plan_id}"))
     else:
         kb.add(InlineKeyboardButton("🔌 وضعیت تأمین‌کننده", callback_data=f"v63_provider_{provider_key}"))
+    if plan and int(plan["is_default"] or 0) != 1:
+        kb.add(InlineKeyboardButton("🗑 حذف پلن", callback_data=f"plan_delete_ask_{plan_id}"))
     kb.add(InlineKeyboardButton("⬅️ مدیریت پلن‌ها", callback_data="adm_plans"))
     kb.add(InlineKeyboardButton("🏠 پنل مدیریت", callback_data="adm_back"))
+    return kb
+
+
+def plan_delete_confirm_kb(plan_id):
+    kb = InlineKeyboardMarkup(row_width=1)
+    kb.add(InlineKeyboardButton("⚠️ بله، حذف کن", callback_data=f"plan_delete_confirm_{plan_id}"))
+    kb.add(InlineKeyboardButton("❌ انصراف", callback_data=f"plan_detail_{plan_id}"))
     return kb
 
 
@@ -3652,6 +3661,42 @@ async def cb_plan_toggle(c: types.CallbackQuery):
         db.log_admin_action(c.from_user.id, "toggle_plan", None, f"plan_id={plan_id}; active={plan['is_active'] if plan else '-'}")
     msg = "✅ وضعیت پلن تغییر کرد." if ok else "❌ امکان تغییر وضعیت این پلن وجود ندارد. پلن پیش‌فرض را غیرفعال نکنید."
     await _replace_callback_message(c, msg + ("\n\n" + _fmt_plan(plan) if plan else ""), reply_markup=plan_detail_kb(plan_id) if plan else plans_menu_kb())
+
+
+async def cb_plan_delete_ask(c: types.CallbackQuery):
+    if not is_admin(c.from_user.id):
+        return await c.answer()
+    await c.answer()
+    plan_id = int(c.data.rsplit("_", 1)[1])
+    plan = db.get_plan(plan_id)
+    if not plan:
+        return await _replace_callback_message(c, "پلن پیدا نشد.", reply_markup=plans_menu_kb())
+    has_history = db.plan_has_purchase_history(plan_id)
+    warn = (
+        "⚠️ این پلن قبلاً فروخته شده. برای حفظ تاریخچه‌ی فروش، حذف کامل نمی‌شود؛ به‌جاش غیرفعال و آرشیو می‌شود."
+        if has_history else
+        "⚠️ این پلن هیچ سابقه‌ی فروشی نداره و کامل حذف می‌شه. مطمئنی؟"
+    )
+    await _replace_callback_message(c, f"{warn}\n\n{_fmt_plan(plan)}", reply_markup=plan_delete_confirm_kb(plan_id))
+
+
+async def cb_plan_delete_confirm(c: types.CallbackQuery):
+    if not is_admin(c.from_user.id):
+        return await c.answer()
+    await c.answer()
+    plan_id = int(c.data.rsplit("_", 1)[1])
+    ok, reason = db.delete_plan(plan_id)
+    if ok and reason == "deleted":
+        db.log_admin_action(c.from_user.id, "delete_plan", None, f"plan_id={plan_id}")
+        return await _replace_callback_message(c, "✅ پلن کامل حذف شد.", reply_markup=plans_menu_kb())
+    if ok and reason == "archived":
+        db.log_admin_action(c.from_user.id, "archive_plan", None, f"plan_id={plan_id}")
+        return await _replace_callback_message(c, "✅ پلن به‌خاطر سابقه‌ی فروش، غیرفعال و آرشیو شد (حذف کامل نشد).", reply_markup=plans_menu_kb())
+    text = {
+        "is_default": "❌ پلن پیش‌فرض قابل حذف نیست؛ اول یه پلن دیگه رو پیش‌فرض کن.",
+        "not_found": "پلن پیدا نشد.",
+    }.get(reason, "❌ حذف پلن انجام نشد.")
+    await _replace_callback_message(c, text, reply_markup=plans_menu_kb())
 
 
 SETTING_FIELDS = [
@@ -4952,6 +4997,8 @@ def register(dp):
     dp.register_callback_query_handler(cb_plan_toggle_delivery, lambda c: c.data.startswith("plan_toggle_delivery_"))
     dp.register_callback_query_handler(cb_plan_toggle_start, lambda c: c.data.startswith("plan_toggle_start_"))
     dp.register_callback_query_handler(cb_plan_toggle, lambda c: c.data.startswith("plan_toggle_"))
+    dp.register_callback_query_handler(cb_plan_delete_ask, lambda c: c.data.startswith("plan_delete_ask_"))
+    dp.register_callback_query_handler(cb_plan_delete_confirm, lambda c: c.data.startswith("plan_delete_confirm_"))
     dp.register_callback_query_handler(cb_plan_wizard_category, lambda c: c.data.startswith("plan_wizard_category_"), state=AdminStates.waiting_plan_form)
     dp.register_callback_query_handler(cb_plan_wizard_volume_unlimited, lambda c: c.data == "plan_wizard_volume_unlimited", state=AdminStates.waiting_plan_form)
     dp.register_callback_query_handler(cb_plan_wizard_mode, lambda c: c.data.startswith("plan_wizard_mode_"), state=AdminStates.waiting_plan_form)

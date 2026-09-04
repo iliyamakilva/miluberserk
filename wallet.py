@@ -181,6 +181,7 @@ async def cb_confirm(c: types.CallbackQuery):
     target_qty = topup["target_quantity"] if "target_quantity" in topup.keys() else None
     target_plan_id = topup["target_plan_id"] if "target_plan_id" in topup.keys() else None
     target_unit_price = topup["target_unit_price"] if "target_unit_price" in topup.keys() else None
+    target_custom_name = topup["target_custom_name"] if "target_custom_name" in topup.keys() else None
     discount_code = topup["discount_code"] if "discount_code" in topup.keys() else None
 
     if target_qty and target_plan_id and not topup["purchase_completed_at"]:
@@ -198,6 +199,7 @@ async def cb_confirm(c: types.CallbackQuery):
                     int(target_unit_price) if target_unit_price else None,
                     note=f"auto_after_topup_id={topup_id}", discount_code=discount_code,
                     request_key=f"topup:{topup_id}",
+                    custom_base_username=target_custom_name,
                 )
             else:
                 result = commerce.complete_pool_purchase(
@@ -270,28 +272,41 @@ async def cb_confirm(c: types.CallbackQuery):
                         reply_markup=menus.main_reply_kb(topup["user_id"]),
                     )
                     for index, item in enumerate(result["items"], start=1):
-                        await _bot_send_content(
-                            bot, int(topup["user_id"]), "service_delivery",
-                            {
-                                "order_id": result["purchase_id"],
-                                "plan_title": plan["title"] if plan else "سرویس",
-                                "username": item.get("account_name") or item.get("panel_username") or f"سرویس {index}",
-                                "volume": plan["volume_label"] if plan else "-",
-                                "duration": plan["duration_label"] if plan else "-",
-                                "devices": "نامحدود" if not plan or plan["panel_max_devices"] in (None, "", 0) else f"{plan['panel_max_devices']} دستگاه",
-                                "expire_date": item.get("panel_expires_at") or "-",
-                                "subscription_url": item["link"],
-                                "provider_public_name": "تحویل آماده" if plan and db.plan_provider_key(plan) == "pool" else "ساخت خودکار",
-                                "created_at": item.get("assigned_at") or "-",
-                            },
-                            category_id=category_id, plan_id=target_plan_id,
-                        )
+                        delivery_values = {
+                            "order_id": result["purchase_id"],
+                            "plan_title": plan["title"] if plan else "سرویس",
+                            "username": item.get("account_name") or item.get("panel_username") or f"سرویس {index}",
+                            "volume": plan["volume_label"] if plan else "-",
+                            "duration": plan["duration_label"] if plan else "-",
+                            "devices": "نامحدود" if not plan or plan["panel_max_devices"] in (None, "", 0) else f"{plan['panel_max_devices']} دستگاه",
+                            "expire_date": item.get("panel_expires_at") or "-",
+                            "subscription_url": item["link"],
+                            "provider_public_name": "تحویل آماده" if plan and db.plan_provider_key(plan) == "pool" else "ساخت خودکار",
+                            "created_at": item.get("assigned_at") or "-",
+                        }
+                        delivery = content.render("service_delivery", delivery_values, category_id=category_id, plan_id=target_plan_id)
+                        delivery_kb = types.InlineKeyboardMarkup(row_width=1)
+                        delivery_kb.add(types.InlineKeyboardButton("📖 راهنمای اتصال", callback_data="guide_home"))
+                        delivery_kb.add(types.InlineKeyboardButton("🔄 تمدید همین سرویس", callback_data=f"buy_plan_{target_plan_id}"))
                         qr_path = make_qr(item["link"], topup["user_id"])
                         try:
-                            qr = content.render("service_qr", {"username": item.get("account_name") or f"سرویس {index}"}, category_id=category_id, plan_id=target_plan_id)
-                            with open(qr_path, "rb") as f:
-                                sent_service = await bot.send_photo(int(topup["user_id"]), f, caption=qr["text"], parse_mode=qr["parse_mode_api"])
-                                db.track_bot_message(sent_service.chat.id, topup["user_id"], sent_service.message_id, "auto_purchase_delivery", kind="delivery")
+                            if len(delivery["text"]) <= content.CAPTION_LIMIT:
+                                with open(qr_path, "rb") as f:
+                                    sent_service = await bot.send_photo(
+                                        int(topup["user_id"]), f, caption=delivery["text"],
+                                        parse_mode=delivery["parse_mode_api"], reply_markup=delivery_kb,
+                                    )
+                                    db.track_bot_message(sent_service.chat.id, topup["user_id"], sent_service.message_id, "auto_purchase_delivery", kind="delivery")
+                            else:
+                                # caption too long for Telegram's limit: fall back to two
+                                # messages, but the photo still keeps the inline buttons.
+                                await _bot_send_content(
+                                    bot, int(topup["user_id"]), "service_delivery", delivery_values,
+                                    category_id=category_id, plan_id=target_plan_id,
+                                )
+                                with open(qr_path, "rb") as f:
+                                    sent_service = await bot.send_photo(int(topup["user_id"]), f, reply_markup=delivery_kb)
+                                    db.track_bot_message(sent_service.chat.id, topup["user_id"], sent_service.message_id, "auto_purchase_delivery", kind="delivery")
                         finally:
                             cleanup_qr(qr_path)
                     content.record_funnel(topup["user_id"], "purchase_delivered", category_id=category_id, plan_id=target_plan_id, purchase_id=result["purchase_id"], session_key=f"topup:{topup_id}")

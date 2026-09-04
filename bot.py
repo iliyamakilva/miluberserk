@@ -212,8 +212,8 @@ def plan_action_kb(plan, max_qty=1, user_id=None):
         kb.add(types.InlineKeyboardButton(content.render_button("btn_bulk"), callback_data="buy_bulk"))
     if mode in {"direct", "quantity"} and display["show_discount_button"]:
         kb.add(types.InlineKeyboardButton(content.render_button("btn_discount"), callback_data=f"discount_plan_{plan_id}"))
-    if mode in {"direct", "quantity"} and db.plan_provider_key(plan) != "pool":
-        kb.add(v63_handlers.custom_name_button(plan_id))
+    # Custom service name is now asked right after tapping pay (see
+    # v63_handlers.name_choice_kb / bot._finalize_purchase), not here.
     if category_id:
         kb.add(types.InlineKeyboardButton(content.render_button("btn_back_packages"), callback_data=f"buy_cat_{category_id}"))
     else:
@@ -909,11 +909,42 @@ async def buy_qty(c: types.CallbackQuery, state: FSMContext):
             reply_markup=category_plans_kb(plan["category_id"], c.from_user.id), context="purchase_config_error",
         )
 
+    # Provider-delivered plans let the customer choose a custom account name
+    # (or the default random one) right after they tap pay, instead of a
+    # separate button earlier in the flow. Pool (ready-made link) plans have
+    # no per-account username, so they skip straight to checkout.
+    if delivery_type == "provider":
+        await state.update_data(pending_purchase_qty=qty, pending_purchase_plan_id=plan_id)
+        return await c.message.answer(
+            "📝 برای این سرویس می‌تونی یه اسم دلخواه انتخاب کنی یا از اسم پیش‌فرض (رندوم) استفاده کنی:",
+            reply_markup=v63_handlers.name_choice_kb(qty, plan_id),
+        )
+
+    return await _finalize_purchase(
+        c.from_user.id, c.from_user.username, c.from_user.full_name,
+        c.message, qty, plan_id, plan, state, custom_name=None,
+    )
+
+
+async def _finalize_purchase(user_id_int, username, full_name, message, qty, plan_id, plan, state: FSMContext, custom_name=None):
+    """Runs the actual checkout: quote, top-up-if-needed, provisioning and delivery.
+
+    Called either directly (pool plans / default name) or after the customer
+    types a custom name for a provider-delivered plan.
+    """
+    user_id = str(user_id_int)
+    user = db.get_user(user_id)
+    if user is None:
+        user, _ = db.get_or_create_user(user_id, username, display_name=full_name)
+
+    provider_key = db.plan_provider_key(plan)
+    max_per_order = max(1, min(100, int(plan["max_per_order"] or 1)))
+
     request_key = commerce.purchase_request_key(
         user_id,
-        c.message.chat.id,
-        c.message.message_id,
-        c.data,
+        message.chat.id,
+        message.message_id,
+        f"buy_{qty}_{plan_id}_{custom_name or 'default'}",
     )
     state_data = await state.get_data()
     discount_code = None
@@ -922,9 +953,9 @@ async def buy_qty(c: types.CallbackQuery, state: FSMContext):
     try:
         quote = commerce.quote_purchase(user_id, plan, qty, discount_code)
     except db.PurchaseError as exc:
-        return await c.message.answer(
+        return await message.answer(
             exc.message,
-            reply_markup=plan_action_kb(plan, min(4, max_per_order), c.from_user.id),
+            reply_markup=plan_action_kb(plan, min(4, max_per_order), user_id_int),
         )
 
     was_first_purchase = int(user["purchased"] or 0) == 0
@@ -943,14 +974,15 @@ async def buy_qty(c: types.CallbackQuery, state: FSMContext):
             target_plan_id=plan_id,
             target_total=total,
             target_unit_price=price,
+            target_custom_name=custom_name,
             request_key=request_key,
         )
         commerce.attach_topup_discount(topup_id, discount_code)
-        await state.update_data(topup_id=topup_id)
+        await state.update_data(topup_id=topup_id, pending_purchase_qty=None, pending_purchase_plan_id=None)
         await wallet.TopupStates.waiting_receipt.set()
         content.record_funnel(user_id, "payment_started", category_id=plan["category_id"], plan_id=plan_id, session_key=request_key)
         return await _send_content(
-            c.message, c.from_user.id, "payment_topup",
+            message, user_id_int, "payment_topup",
             {
                 "package_title": plan["title"] or plan["volume_label"] or "بسته سرویس",
                 "quantity": qty,
@@ -976,7 +1008,7 @@ async def buy_qty(c: types.CallbackQuery, state: FSMContext):
                 price,
                 discount_code=discount_code,
                 request_key=request_key,
-                custom_base_username=state_data.get("custom_service_name"),
+                custom_base_username=custom_name,
             )
         else:
             result = commerce.complete_pool_purchase(
@@ -988,27 +1020,27 @@ async def buy_qty(c: types.CallbackQuery, state: FSMContext):
             )
     except db.PurchaseError as exc:
         if exc.code == "insufficient_balance":
-            return await c.message.answer(exc.message, reply_markup=wallet_menu_kb(include_bulk=True))
-        return await c.message.answer(exc.message, reply_markup=menus.main_reply_kb(c.from_user.id))
+            return await message.answer(exc.message, reply_markup=wallet_menu_kb(include_bulk=True))
+        return await message.answer(exc.message, reply_markup=menus.main_reply_kb(user_id_int))
 
-    await state.update_data(active_discount_code=None, active_discount_plan_id=None, custom_service_name=None, active_custom_name_plan_id=None)
+    await state.update_data(active_discount_code=None, active_discount_plan_id=None, pending_purchase_qty=None, pending_purchase_plan_id=None)
     await state.reset_state(with_data=False)
 
     if result.get("queued"):
         content.record_funnel(user_id, "purchase_queued", category_id=plan["category_id"], plan_id=plan_id, purchase_id=result["purchase_id"], session_key=request_key)
         return await _send_content(
-            c.message, c.from_user.id, "order_queued",
+            message, user_id_int, "order_queued",
             {"order_id": result["purchase_id"], "total": content.money(result.get("amount") or total)},
-            reply_markup=menus.main_reply_kb(c.from_user.id), context="purchase_queued", kind="important",
+            reply_markup=menus.main_reply_kb(user_id_int), context="purchase_queued", kind="important",
         )
 
     if result.get("refunded"):
         commerce.claim_purchase_notification(result["purchase_id"], "refund")
         content.record_funnel(user_id, "purchase_refunded", category_id=plan["category_id"], plan_id=plan_id, purchase_id=result["purchase_id"], session_key=request_key)
         return await _send_content(
-            c.message, c.from_user.id, "order_refunded",
+            message, user_id_int, "order_refunded",
             {"order_id": result["purchase_id"], "refund_amount": content.money(result.get("amount") or total)},
-            reply_markup=menus.main_reply_kb(c.from_user.id), context="purchase_refunded", kind="important",
+            reply_markup=menus.main_reply_kb(user_id_int), context="purchase_refunded", kind="important",
         )
 
     if was_first_purchase:
@@ -1037,7 +1069,7 @@ async def buy_qty(c: types.CallbackQuery, state: FSMContext):
     commerce.claim_purchase_notification(result["purchase_id"], "delivery")
     content.record_funnel(user_id, "payment_success", category_id=plan["category_id"], plan_id=plan_id, purchase_id=result["purchase_id"], session_key=request_key)
     await _send_content(
-        c.message, c.from_user.id, "purchase_success",
+        message, user_id_int, "purchase_success",
         {
             "order_id": result["purchase_id"],
             "plan_title": plan["title"] or "سرویس",
@@ -1050,7 +1082,7 @@ async def buy_qty(c: types.CallbackQuery, state: FSMContext):
             "post_purchase_text": post_purchase_text.strip(),
         },
         category_id=plan["category_id"], plan_id=plan_id,
-        reply_markup=menus.main_reply_kb(c.from_user.id), context="purchase_result", kind="important",
+        reply_markup=menus.main_reply_kb(user_id_int), context="purchase_result", kind="important",
     )
 
     for index, item in enumerate(result["items"], start=1):
@@ -1076,21 +1108,22 @@ async def buy_qty(c: types.CallbackQuery, state: FSMContext):
         try:
             if len(delivery["text"]) <= content.CAPTION_LIMIT:
                 with open(qr_path, "rb") as f:
-                    sent_photo = await c.message.answer_photo(
+                    sent_photo = await message.answer_photo(
                         f, caption=delivery["text"], parse_mode=delivery["parse_mode_api"], reply_markup=delivery_kb,
                     )
-                    await _track_sent(c.from_user.id, sent_photo, "purchase_qr", kind="delivery")
+                    await _track_sent(user_id_int, sent_photo, "purchase_qr", kind="delivery")
             else:
                 # caption too long for Telegram's limit: fall back to two messages
-                # instead of silently truncating service info.
+                # instead of silently truncating service info, but still attach
+                # the inline buttons to the photo message.
                 await _send_content(
-                    c.message, c.from_user.id, "service_delivery", delivery_values,
+                    message, user_id_int, "service_delivery", delivery_values,
                     category_id=plan["category_id"], plan_id=plan_id,
                     context="purchase_link", kind="delivery",
                 )
                 with open(qr_path, "rb") as f:
-                    sent_photo = await c.message.answer_photo(f, reply_markup=delivery_kb)
-                    await _track_sent(c.from_user.id, sent_photo, "purchase_qr", kind="delivery")
+                    sent_photo = await message.answer_photo(f, reply_markup=delivery_kb)
+                    await _track_sent(user_id_int, sent_photo, "purchase_qr", kind="delivery")
         finally:
             cleanup_qr(qr_path)
 
@@ -1101,7 +1134,7 @@ async def buy_qty(c: types.CallbackQuery, state: FSMContext):
             await bot.send_message(
                 admin_id,
                 f"🛒 خرید جدید\n"
-                f"کاربر: {c.from_user.full_name} (@{c.from_user.username or '-'})\n"
+                f"کاربر: {full_name} (@{username or '-'})\n"
                 f"ID: {user_id}\n"
                 f"شماره خرید: #{result['purchase_id']}\n"
                 f"پلن: {plan['title']}\n"
@@ -1111,6 +1144,7 @@ async def buy_qty(c: types.CallbackQuery, state: FSMContext):
             )
         except Exception as exc:
             logger.warning("could not send purchase notification to admin %s: %s", admin_id, exc)
+
 
 @dp.callback_query_handler(lambda c: c.data == "confirm_buy")
 async def confirm_buy(c: types.CallbackQuery):
